@@ -4,6 +4,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 type AuthMethod = "qr" | "twoFactor";
+type ProtonSource = "managed" | "custom";
+type UmuSource = "managed" | "system";
 type Preferences = {
   installDirectory: string;
   steamUsername: string;
@@ -11,6 +13,15 @@ type Preferences = {
   authMethod: AuthMethod;
   crossoverBottle: string;
   crossoverBackend: string;
+  protonVersion: string;
+  protonSource: ProtonSource;
+  protonCustomPath: string;
+  umuSource: UmuSource;
+  protonPrefix: string;
+  launchOptions: string;
+  gameId: string;
+  envOverrides: string;
+  protonDebugLogging: boolean;
 };
 type CrossOverStatus = {
   supported: boolean;
@@ -49,6 +60,29 @@ type ReleaseInfo = {
   size: number;
   digest: string | null;
 };
+type ProtonRelease = {
+  tag: string;
+  assetName: string;
+  downloadUrl: string;
+  size: number;
+  digest: string | null;
+  publishedAt: string | null;
+  prerelease: boolean;
+  installed: boolean;
+};
+type ProtonStatus = {
+  supported: boolean;
+  umuAvailable: boolean;
+  umuVersion: string | null;
+  umuSource: string | null;
+  selectedTag: string | null;
+  protonPath: string | null;
+  installedTags: string[];
+  prefixPath: string;
+  prefixInitialized: boolean;
+  ready: boolean;
+  error: string | null;
+};
 type AppSnapshot = {
   platform: PlatformSupport;
   preferences: Preferences;
@@ -57,6 +91,7 @@ type AppSnapshot = {
   updateAvailable: boolean;
   releaseError: string | null;
   crossover: CrossOverStatus | null;
+  proton: ProtonStatus | null;
 };
 type OperationKind = "install" | "repair" | "update" | "missions";
 type OperationEvent =
@@ -128,6 +163,25 @@ const authQrCode = (() => {
   if (!found) throw new Error("Missing interface element: #auth-qr-code");
   return found;
 })();
+const protonSection = element<HTMLElement>("#proton-section");
+const protonStatus = element<HTMLElement>("#proton-status");
+const protonVersion = element<HTMLSelectElement>("#proton-version");
+const protonCustomPath = element<HTMLInputElement>("#proton-custom-path");
+const protonUmuSource = element<HTMLSelectElement>("#proton-umu-source");
+const protonToggle = element<HTMLButtonElement>("#proton-toggle");
+const launchOptions = element<HTMLInputElement>("#launch-options");
+const protonGameId = element<HTMLInputElement>("#proton-game-id");
+const protonEnv = element<HTMLTextAreaElement>("#proton-env");
+const protonDebug = element<HTMLInputElement>("#proton-debug");
+const protonProgress = element<HTMLElement>("#proton-progress");
+const protonProgressKind = element<HTMLElement>("#proton-progress-kind");
+const protonProgressMessage = element<HTMLElement>("#proton-progress-message");
+const protonProgressPercent = element<HTMLElement>("#proton-progress-percent");
+const protonProgressFill = element<HTMLElement>("#proton-progress-fill");
+const protonProgressCancel = element<HTMLButtonElement>("#proton-progress-cancel");
+const setupProtonPage = element<HTMLElement>("#setup-proton-page");
+const setupProtonVersion = element<HTMLSelectElement>("#setup-proton-version");
+const setupProtonCustom = element<HTMLInputElement>("#setup-proton-custom");
 
 let snapshot: AppSnapshot | null = null;
 let primaryMode: OperationKind | "launch" = "install";
@@ -143,6 +197,15 @@ let setupDraft: Preferences = {
   authMethod: "qr",
   crossoverBottle: "Sunrise",
   crossoverBackend: "d3dmetal",
+  protonVersion: "",
+  protonSource: "managed",
+  protonCustomPath: "",
+  umuSource: "managed",
+  protonPrefix: "",
+  launchOptions: "",
+  gameId: "sunrise",
+  envOverrides: "",
+  protonDebugLogging: false,
 };
 let setupInspection: InstallationSnapshot | null = null;
 let setupLanguageFolder = "";
@@ -155,10 +218,19 @@ let statusTimer: number | undefined;
 let setupInspectionTimer: number | undefined;
 let toastTimer: number | undefined;
 let operationHideTimer: number | undefined;
-let launchGuardTimer: number | undefined;
+let gameStatusTimer: number | undefined;
 let authHideTimer: number | undefined;
 let mockOperationCancelled = false;
-const LAUNCH_GUARD_MS = 4000;
+let mockGameRunning = false;
+let protonReleases: ProtonRelease[] = [];
+let protonCatalogError: string | null = null;
+type ProtonOperation = "install" | "remove" | "prepare";
+let activeProtonOperation: ProtonOperation | null = null;
+let protonProgressHideTimer: number | undefined;
+let protonReconcileTimer: number | undefined;
+let lastConsoleLine: string | null = null;
+const isLinux = () => snapshot?.platform.os === "linux";
+const GAME_POLL_MS = 1000;
 const inTauri = "__TAURI_INTERNALS__" in window;
 const appWindow = inTauri ? getCurrentWindow() : null;
 const mockQrRows = [
@@ -190,6 +262,15 @@ const mockSnapshot: AppSnapshot = {
     authMethod: "qr",
     crossoverBottle: "Sunrise",
     crossoverBackend: "d3dmetal",
+    protonVersion: "",
+    protonSource: "managed",
+    protonCustomPath: "",
+    umuSource: "managed",
+    protonPrefix: "",
+    launchOptions: "",
+    gameId: "sunrise",
+    envOverrides: "",
+    protonDebugLogging: false,
   },
   installation: {
     status: "notInstalled",
@@ -212,11 +293,30 @@ const mockSnapshot: AppSnapshot = {
   updateAvailable: false,
   releaseError: null,
   crossover: null,
+  proton: null,
 };
 
 async function invokeCommand<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
   if (inTauri) return invoke<T>(command, args);
   if (command === "get_app_snapshot") return structuredClone(mockSnapshot) as T;
+  if (command === "get_proton_status") return null as T;
+  if (command === "list_proton_releases") {
+    return [
+      {
+        tag: "GE-Proton11-7",
+        assetName: "GE-Proton11-7-x86_64.tar.gz",
+        downloadUrl: "",
+        size: 563_784_602,
+        digest: "sha256:preview",
+        publishedAt: null,
+        prerelease: false,
+        installed: false,
+      },
+    ] as T;
+  }
+  if (command === "install_proton" || command === "remove_proton" || command === "initialize_proton_prefix") {
+    return null as T;
+  }
   if (command === "inspect_installation") {
     const selected = String(args.installDirectory ?? "").trim();
     const knownInstallation = selected === mockSnapshot.preferences.installDirectory && mockSnapshot.installation.gameFound;
@@ -309,6 +409,12 @@ async function invokeCommand<T>(command: string, args: Record<string, unknown> =
     mockOperationCancelled = true;
     return true as T;
   }
+  if (command === "launch_game") {
+    mockGameRunning = true;
+    return undefined as T;
+  }
+  if (command === "game_status") return mockGameRunning as T;
+  if (command === "proton_operation_active") return false as T;
   if (command === "send_terminal_input") return true as T;
   return undefined as T;
 }
@@ -382,6 +488,244 @@ function renderCrossover(data: AppSnapshot) {
   crossoverPrepare.textContent = status.bottleExists ? "Bottle ready" : "Prepare bottle";
 }
 
+function protonReady() {
+  return Boolean(snapshot?.proton?.ready);
+}
+
+/** Launch is possible on Windows, or on Linux */
+function canLaunch() {
+  if (!snapshot) return false;
+  if (snapshot.platform.canLaunch) return true;
+  return isLinux() && protonReady();
+}
+
+function protonStatusCopy(status: ProtonStatus | null): string {
+  if (!status) return "Proton is unavailable on this platform.";
+  if (status.error) return status.error;
+  const umu = !status.umuAvailable
+    ? "umu-launcher missing"
+    : status.umuSource === "system"
+      ? "umu-launcher (system)"
+      : `umu-launcher ${status.umuVersion} (${status.umuSource})`;
+  const proton = status.selectedTag ?? "no Proton selected";
+  const prefix = status.prefixInitialized ? "environment ready" : "environment not prepared";
+  return `${umu} · ${proton} · ${prefix}`;
+}
+
+function renderProtonOptions(select: HTMLSelectElement, selected: string) {
+  const installed = snapshot?.proton?.installedTags ?? [];
+  const options: HTMLOptionElement[] = [];
+
+  for (const tag of installed) {
+    const option = document.createElement("option");
+    option.value = tag;
+    option.textContent = `${tag} (installed)`;
+    options.push(option);
+  }
+  for (const release of protonReleases) {
+    if (installed.includes(release.tag)) continue;
+    const option = document.createElement("option");
+    option.value = release.tag;
+    option.textContent = release.prerelease ? `${release.tag} (pre-release)` : release.tag;
+    options.push(option);
+  }
+
+  select.replaceChildren(...options);
+  if (selected && options.some((option) => option.value === selected)) {
+    select.value = selected;
+  } else if (options.length) {
+    select.value = options[0].value;
+  }
+}
+
+function renderProton() {
+  const status = snapshot?.proton ?? null;
+  protonSection.hidden = !isLinux();
+  if (!isLinux()) return;
+
+  protonStatus.textContent = protonStatusCopy(status);
+  protonStatus.classList.toggle("ready", Boolean(status?.ready));
+  protonStatus.classList.toggle("problem", Boolean(status?.error));
+
+  const desired = snapshot?.preferences.protonVersion?.trim() || status?.selectedTag || "";
+  renderProtonOptions(protonVersion, desired);
+  protonCustomPath.value = snapshot?.preferences.protonCustomPath ?? "";
+  protonUmuSource.value = snapshot?.preferences.umuSource ?? "managed";
+  launchOptions.value = snapshot?.preferences.launchOptions ?? "";
+  protonGameId.value = snapshot?.preferences.gameId ?? "sunrise";
+  protonEnv.value = snapshot?.preferences.envOverrides ?? "";
+  protonDebug.checked = Boolean(snapshot?.preferences.protonDebugLogging);
+
+  const busy = operationRunning;
+  const selected = protonVersion.value;
+  const selectedInstalled = (status?.installedTags ?? []).includes(selected);
+  protonToggle.textContent = selectedInstalled ? "Remove" : "Download";
+  protonToggle.classList.toggle("danger", selectedInstalled);
+  protonToggle.disabled = busy || !selected;
+  element<HTMLButtonElement>("#proton-prepare").disabled = busy || !status?.protonPath || !status?.umuAvailable;
+  element<HTMLButtonElement>("#proton-refresh").disabled = busy;
+}
+
+async function loadProtonReleases(refresh = false) {
+  if (!isLinux()) return;
+  protonCatalogError = null;
+  try {
+    protonReleases = await invokeCommand<ProtonRelease[]>("list_proton_releases", { refresh });
+  } catch (error) {
+    protonReleases = [];
+    protonCatalogError = String(error);
+  }
+  renderProton();
+}
+
+async function saveProtonPreferences() {
+  if (!snapshot) return;
+  const preferences: Preferences = {
+    ...snapshot.preferences,
+    protonVersion: protonVersion.value,
+    protonSource: protonCustomPath.value.trim() ? "custom" : "managed",
+    protonCustomPath: protonCustomPath.value.trim(),
+    umuSource: protonUmuSource.value as UmuSource,
+    launchOptions: launchOptions.value,
+    gameId: protonGameId.value.trim() || "sunrise",
+    envOverrides: protonEnv.value,
+    protonDebugLogging: protonDebug.checked,
+  };
+  try {
+    await invokeCommand("save_preferences", { preferences });
+    snapshot = { ...snapshot, preferences };
+    const status = await invokeCommand<ProtonStatus | null>("get_proton_status", { preferences });
+    snapshot = { ...snapshot, proton: status };
+    renderProton();
+    renderSnapshot(snapshot);
+  } catch (error) {
+    showToast(String(error), "error");
+  }
+}
+
+function setProtonProgress(kind: ProtonOperation, message: string, percent: number, cancellable = true) {
+  window.clearTimeout(protonProgressHideTimer);
+  protonProgressKind.textContent =
+    kind === "prepare" ? "PREPARING PROTON" : kind === "remove" ? "REMOVING PROTON" : "DOWNLOADING PROTON";
+  protonProgressMessage.textContent = message;
+  const normalized = Math.max(0, Math.min(100, percent));
+  const percentLabel = Number.isInteger(normalized) ? String(normalized) : normalized.toFixed(2);
+  protonProgressPercent.textContent = `${percentLabel}%`;
+  protonProgressFill.style.width = `${normalized}%`;
+  protonProgress.querySelector<HTMLElement>(".progress-track")!.setAttribute("aria-valuenow", normalized.toFixed(1));
+  protonProgressCancel.disabled = !cancellable;
+  protonProgress.hidden = false;
+}
+
+function hideProtonProgress() {
+  window.clearTimeout(protonProgressHideTimer);
+  protonProgress.hidden = true;
+  protonProgressCancel.disabled = true;
+}
+
+function stopProtonReconcile() {
+  window.clearInterval(protonReconcileTimer);
+  protonReconcileTimer = undefined;
+}
+
+async function pollProtonOperation() {
+  try {
+    if (await invokeCommand<boolean>("proton_operation_active")) return;
+  } catch {
+    return;
+  }
+  stopProtonReconcile();
+  operationRunning = false;
+  activeProtonOperation = null;
+  hideProtonProgress();
+  await loadSnapshot(true);
+  await loadProtonReleases();
+}
+
+// Re-attaches to a proton operation that the backend is still running after the
+// webview lost track of it (for example a dev reload).
+async function syncProtonOperation() {
+  if (activeProtonOperation) {
+    renderProton();
+    return;
+  }
+  let busy = false;
+  try {
+    busy = await invokeCommand<boolean>("proton_operation_active");
+  } catch {
+    return;
+  }
+  if (!busy) return;
+  operationRunning = true;
+  setProtonProgress("install", "A Proton operation is already running…", 0, false);
+  renderProton();
+  stopProtonReconcile();
+  protonReconcileTimer = window.setInterval(() => void pollProtonOperation(), GAME_POLL_MS);
+}
+
+function handleProtonEvent(message: OperationEvent) {
+  if (message.event === "progress") {
+    setProtonProgress(activeProtonOperation ?? "install", message.message, message.percent);
+    return;
+  }
+  if (message.event === "notice") {
+    element("#operation-notice").textContent = message.message;
+    appendConsole(`[launcher] ${message.message}\n`, "notice");
+  }
+}
+
+async function runProtonCommand(
+  command: string,
+  args: Record<string, unknown> = {},
+  kind: ProtonOperation = "install",
+) {
+  if (operationRunning) return;
+  operationRunning = true;
+  activeProtonOperation = kind;
+  operationStrip.hidden = true;
+  stopProtonReconcile();
+  renderProton();
+  setProtonProgress(
+    kind,
+    kind === "remove" ? `Removing ${args.tag ?? ""}…` : "Starting…",
+    0,
+    kind !== "remove",
+  );
+  const onEvent: EventSink = inTauri ? new Channel<OperationEvent>() : {};
+  if (kind !== "remove") onEvent.onmessage = handleProtonEvent;
+  let success = false;
+  try {
+    if (kind === "remove") {
+      setProtonProgress(kind, `Removing ${args.tag ?? ""}…`, 95, false);
+      const status = await invokeCommand<ProtonStatus | null>(command, args);
+      if (status && snapshot) snapshot = { ...snapshot, proton: status };
+    } else {
+      const status = await invokeCommand<ProtonStatus | null>(command, { ...args, onEvent });
+      if (status && snapshot) snapshot = { ...snapshot, proton: status };
+    }
+    success = true;
+    const toast = kind === "install"
+      ? `GE-Proton ${args.tag ?? ""} installed.`
+      : kind === "remove"
+        ? "GE-Proton removed."
+        : "Proton environment is ready.";
+    showToast(toast);
+  } catch (error) {
+    showToast(String(error), "error");
+  } finally {
+    operationRunning = false;
+    activeProtonOperation = null;
+    if (success) {
+      setProtonProgress(kind, "Done.", 100, true);
+      protonProgressHideTimer = window.setTimeout(hideProtonProgress, 1200);
+    } else {
+      hideProtonProgress();
+    }
+    await loadSnapshot(true);
+    await loadProtonReleases();
+  }
+}
+
 function renderSnapshot(data: AppSnapshot) {
   snapshot = data;
   gameLanguage.value = data.preferences.steamLanguage || "english";
@@ -412,7 +756,7 @@ function renderSnapshot(data: AppSnapshot) {
   } else if (installed && updateAvailable) {
     primaryMode = "update";
     primaryLabel.textContent = "UPDATE";
-  } else if (installed && data.platform.canLaunch) {
+  } else if (installed && canLaunch()) {
     primaryMode = "launch";
     primaryLabel.textContent = "PLAY";
   } else if (installed) {
@@ -423,15 +767,18 @@ function renderSnapshot(data: AppSnapshot) {
     primaryLabel.textContent = "INSTALL";
   }
 
-  if (gameLaunching && primaryMode === "launch") {
-    primaryLabel.textContent = "LAUNCHING";
+  if (gameLaunching) {
+    primaryMode = "launch";
+    primaryLabel.textContent = "RUNNING";
   }
 
   const supported = data.platform.level !== "unsupported";
   primaryAction.disabled = operationRunning || gameLaunching || !supported;
   repairAction.disabled = operationRunning || gameLaunching || !data.installation.gameFound;
   missionsAction.disabled = repairAction.disabled;
-  launchAction.disabled = operationRunning || gameLaunching || !data.installation.gameFound || !data.platform.canLaunch;
+  launchAction.disabled = operationRunning || gameLaunching || !data.installation.gameFound || !canLaunch();
+  launchAction.textContent = gameLaunching ? "Running" : "Launch game";
+  renderProton();
 }
 
 async function loadSnapshot(useInputs = false) {
@@ -451,13 +798,13 @@ async function loadSnapshot(useInputs = false) {
     renderSnapshot(data);
   } catch (error) {
     showToast(String(error), "error");
-    element("#status-pill-text").textContent = "Status unavailable";
   }
 }
 
 async function saveAndInspect() {
   if (operationRunning) return;
   const preferences: Preferences = {
+    ...(snapshot?.preferences ?? setupDraft),
     installDirectory: installDirectory.value.trim(),
     steamUsername: steamUsername.value.trim(),
     steamLanguage: gameLanguage.value,
@@ -488,6 +835,8 @@ function openSettings() {
   setOverlay(setupView, false);
   setOverlay(authView, false);
   setOverlay(settingsView, true);
+  void loadProtonReleases();
+  void syncProtonOperation();
   window.requestAnimationFrame(() => element<HTMLElement>("#settings-title").focus());
 }
 
@@ -548,7 +897,18 @@ function queueSetupInspection() {
   }, 350);
 }
 
+// The Proton page always occupies DOM/indicator slot 2 and review always occupies
+// slot 3, whether or not Proton is shown; on non-Linux, slot 2 is simply skipped,
+// which is why the step *count* needs its own position lookup below.
+const REVIEW_STEP = 3;
+
 function renderSetupStep() {
+  const protonStep = isLinux();
+  const totalSteps = protonStep ? 4 : 3;
+  const stepOrder = protonStep ? [0, 1, 2, 3] : [0, 1, 3];
+  setupProtonPage.hidden = !protonStep;
+  element<HTMLElement>("#setup-proton-indicator").hidden = !protonStep;
+
   document.querySelectorAll<HTMLElement>("[data-setup-page]").forEach((page) => {
     page.hidden = Number(page.dataset.setupPage) !== setupStep;
   });
@@ -559,10 +919,15 @@ function renderSetupStep() {
   });
   setupBack.hidden = setupStep === 0;
   const existingGame = Boolean(setupInspection?.gameFound);
-  setupNext.textContent = setupStep === 2
+  setupNext.textContent = setupStep === REVIEW_STEP
     ? existingGame ? "Verify & install" : "Install Sunrise"
     : "Continue";
-  element("#setup-step-count").textContent = `${setupStep + 1} / 3`;
+  const position = stepOrder.indexOf(setupStep) + 1;
+  element("#setup-step-count").textContent = `${position} / ${totalSteps}`;
+  element("#setup-kicker-location").textContent = `Step 1 of ${totalSteps}`;
+  element("#setup-kicker-steam").textContent = `Step 2 of ${totalSteps}`;
+  if (protonStep) element("#setup-kicker-proton").textContent = `Step 3 of ${totalSteps}`;
+  element("#setup-kicker-review").textContent = `Step ${totalSteps} of ${totalSteps}`;
   if (setupStep === 0) {
     setupInstallDirectory.value = setupDraft.installDirectory;
     renderSetupInspection(setupInspection);
@@ -575,7 +940,19 @@ function renderSetupStep() {
       input.checked = input.value === setupDraft.authMethod;
     });
   }
-  if (setupStep === 2) {
+  if (protonStep && setupStep === 2) {
+    renderProtonOptions(setupProtonVersion, setupDraft.protonVersion);
+    setupProtonCustom.value = setupDraft.protonCustomPath;
+    const status = snapshot?.proton ?? null;
+    element("#setup-proton-hint").textContent = status?.ready
+      ? "Proton is already prepared"
+      : protonCatalogError ?? (setupProtonCustom.value.trim()
+        ? "Your custom Proton folder will be used"
+        : "Downloaded from GitHub and prepared when setup finishes");
+    const ready = Boolean(status?.ready);
+    element<HTMLElement>("#setup-proton-status").hidden = !ready;
+  }
+  if (setupStep === REVIEW_STEP) {
     setupView.dataset.installDirectory = setupDraft.installDirectory;
     setupView.dataset.steamUsername = setupDraft.steamUsername;
     setupView.dataset.steamLanguage = setupDraft.steamLanguage;
@@ -591,6 +968,10 @@ function renderSetupStep() {
     element("#setup-review-language").textContent = languageLabel(setupDraft.steamLanguage);
     element("#setup-review-username").textContent = setupDraft.steamUsername || "—";
     element("#setup-review-auth").textContent = setupDraft.authMethod === "qr" ? "QR code" : "Steam Guard code";
+    element<HTMLElement>("#setup-review-proton-row").hidden = !protonStep;
+    element("#setup-review-proton").textContent = setupDraft.protonCustomPath
+      ? `Custom: ${setupDraft.protonCustomPath}`
+      : setupDraft.protonVersion || "Managed GE-Proton";
     element("#setup-review-space").textContent = existingGame
       ? "Approximately 5 GiB free"
       : "Approximately 110 GiB";
@@ -606,6 +987,15 @@ function openSetup() {
     steamLanguage: snapshot?.preferences.steamLanguage ?? "english",
     authMethod: snapshot?.preferences.authMethod ?? "qr",
     ...crossoverPreferences(),
+    protonVersion: snapshot?.preferences.protonVersion ?? "",
+    protonSource: snapshot?.preferences.protonSource ?? "managed",
+    protonCustomPath: snapshot?.preferences.protonCustomPath ?? "",
+    umuSource: snapshot?.preferences.umuSource ?? "managed",
+    protonPrefix: snapshot?.preferences.protonPrefix ?? "",
+    launchOptions: snapshot?.preferences.launchOptions ?? "",
+    gameId: snapshot?.preferences.gameId ?? "sunrise",
+    envOverrides: snapshot?.preferences.envOverrides ?? "",
+    protonDebugLogging: snapshot?.preferences.protonDebugLogging ?? false,
   };
   setupInspection = snapshot?.installation ?? null;
   setupLanguageFolder = "";
@@ -613,6 +1003,7 @@ function openSetup() {
   renderSetupStep();
   setOverlay(setupView, true);
   void inspectSetupDirectory(setupDraft.installDirectory);
+  void loadProtonReleases();
   window.requestAnimationFrame(() => setupInstallDirectory.focus());
 }
 
@@ -654,7 +1045,16 @@ async function advanceSetup() {
     setupDraft.steamUsername = setupSteamUsername.value.trim();
     setupDraft.steamLanguage = setupGameLanguage.value;
     setupDraft.authMethod = element<HTMLInputElement>('input[name="setup-auth-method"]:checked').value as AuthMethod;
-    setupStep = 2;
+    setupStep = isLinux() ? 2 : REVIEW_STEP;
+    renderSetupStep();
+    if (setupStep === REVIEW_STEP) window.requestAnimationFrame(() => element<HTMLElement>("#setup-review-title").focus());
+    return;
+  }
+  if (isLinux() && setupStep === 2) {
+    setupDraft.protonVersion = setupProtonVersion.value;
+    setupDraft.protonCustomPath = setupProtonCustom.value.trim();
+    setupDraft.protonSource = setupDraft.protonCustomPath ? "custom" : "managed";
+    setupStep = REVIEW_STEP;
     renderSetupStep();
     window.requestAnimationFrame(() => element<HTMLElement>("#setup-review-title").focus());
     return;
@@ -667,12 +1067,33 @@ async function advanceSetup() {
     authMethod: (setupView.dataset.authMethod as AuthMethod | undefined) ?? setupDraft.authMethod,
     crossoverBottle: setupDraft.crossoverBottle,
     crossoverBackend: setupDraft.crossoverBackend,
+    protonVersion: setupDraft.protonVersion,
+    protonSource: setupDraft.protonSource,
+    protonCustomPath: setupDraft.protonCustomPath,
+    umuSource: setupDraft.umuSource,
+    protonPrefix: setupDraft.protonPrefix,
+    launchOptions: setupDraft.launchOptions,
+    gameId: setupDraft.gameId,
+    envOverrides: setupDraft.envOverrides,
+    protonDebugLogging: setupDraft.protonDebugLogging,
   };
   installDirectory.value = setupPreferences.installDirectory;
   steamUsername.value = setupPreferences.steamUsername;
   gameLanguage.value = setupPreferences.steamLanguage;
+  // run_operation only persists the install-related fields; save the Proton
+  // choice explicitly first so it survives and is ready to hand to
+  // completeLinuxProtonSetup below.
+  try {
+    await invokeCommand("save_preferences", { preferences: setupPreferences });
+  } catch (error) {
+    showToast(String(error), "error");
+  }
   closeSetup();
-  await runOperation("install", setupPreferences);
+  await runOperation(
+    "install",
+    setupPreferences,
+    isLinux() ? (onEvent) => completeLinuxProtonSetup(setupPreferences, onEvent) : undefined,
+  );
 }
 
 function hideAuth() {
@@ -850,6 +1271,8 @@ function updateOperationStep(stage: string, message: string) {
     label = "UPDATING MISSIONS";
   } else if (stage === "missions") {
     label = "INSTALLING MISSIONS";
+  } else if (stage === "proton") {
+    label = "PREPARING PROTON";
   } else if (stage === "depots") {
     label = message.trimStart().toLowerCase().startsWith("validating")
       ? "VALIDATING DESTINY 2"
@@ -863,6 +1286,18 @@ function updateOperationStep(stage: string, message: string) {
   }
 
   element("#operation-kind").textContent = label;
+}
+
+/** Restarts the visible progress bar for a new phase of the same operation
+ * strip (e.g. moving from the Sunrise install into Proton setup) without
+ * wiping the console log the user has been watching. */
+function resetOperationProgress(stage: string, message: string) {
+  updateOperationStep(stage, message);
+  element("#operation-message").textContent = message;
+  element("#operation-percent").textContent = "0%";
+  element("#progress-fill").style.width = "0%";
+  element<HTMLElement>(".progress-track").setAttribute("aria-valuenow", "0");
+  appendConsole(`[${stage}] ${message}\n`, "notice");
 }
 
 function appendConsole(text: string, stream = "stdout") {
@@ -932,14 +1367,50 @@ function handleOperationEvent(message: OperationEvent) {
   element("#progress-fill").style.width = `${percent}%`;
   element<HTMLElement>(".progress-track").setAttribute("aria-valuenow", percent.toFixed(1));
   if (message.stage !== "depots") {
-    appendConsole(`[${message.stage}] ${message.message}\n`, "notice");
+    const line = `[${message.stage}] ${message.message}`;
+    if (lastConsoleLine !== line) {
+      lastConsoleLine = line;
+      appendConsole(`${line}\n`, "notice");
+    }
   }
 }
 
-async function runOperation(kind: OperationKind, requestedPreferences?: Preferences) {
+/** Downloads/prepares Proton so the setup wizard's Proton step actually does
+ * what it says, instead of only saving preferences. Linux-only; a no-op
+ * everywhere else. Runs as a continuation of the install operation, using the
+ * same progress strip and event channel. */
+async function completeLinuxProtonSetup(preferences: Preferences, onEvent: EventSink) {
+  if (!isLinux()) return;
+
+  const status = await invokeCommand<ProtonStatus | null>("get_proton_status", { preferences });
+  if (status?.ready) {
+    if (snapshot) snapshot = { ...snapshot, proton: status };
+    return;
+  }
+
+  const tag = preferences.protonSource === "managed" ? preferences.protonVersion.trim() : "";
+  const alreadyInstalled = tag !== "" && (status?.installedTags ?? []).includes(tag);
+  if (tag && !alreadyInstalled) {
+    resetOperationProgress("proton", `Downloading GE-Proton ${tag}…`);
+    await invokeCommand("install_proton", { tag, onEvent });
+  }
+
+  resetOperationProgress("proton", "Preparing the Proton environment…");
+  await invokeCommand("initialize_proton_prefix", { onEvent });
+
+  const refreshed = await invokeCommand<ProtonStatus | null>("get_proton_status", { preferences });
+  if (refreshed && snapshot) snapshot = { ...snapshot, proton: refreshed };
+}
+
+async function runOperation(
+  kind: OperationKind,
+  requestedPreferences?: Preferences,
+  afterSuccess?: (onEvent: EventSink) => Promise<void>,
+) {
   if (operationRunning) return;
   let operationCompleted = false;
   const operationPreferences: Preferences = requestedPreferences ?? {
+    ...(snapshot?.preferences ?? setupDraft),
     installDirectory: installDirectory.value.trim(),
     steamUsername: steamUsername.value.trim(),
     steamLanguage: gameLanguage.value,
@@ -977,6 +1448,13 @@ async function runOperation(kind: OperationKind, requestedPreferences?: Preferen
     });
     operationCompleted = true;
     if (!operationCancellationRequested) showToast(result.message);
+    if (afterSuccess && !operationCancellationRequested) {
+      try {
+        await afterSuccess(onEvent);
+      } catch (protonError) {
+        showToast(`Sunrise installed, but Proton setup needs attention: ${protonError}`, "error");
+      }
+    }
   } catch (error) {
     const message = String(error);
     if (pendingAuthRestart) {
@@ -1008,7 +1486,7 @@ async function runOperation(kind: OperationKind, requestedPreferences?: Preferen
     gameLanguage.value = operationPreferences.steamLanguage;
     element<HTMLButtonElement>("#browse-directory").disabled = false;
     await loadSnapshot(true);
-    if (operationCompleted && snapshot?.platform.canLaunch) {
+    if (operationCompleted && canLaunch()) {
       primaryMode = "launch";
       primaryLabel.textContent = "PLAY";
       primaryAction.disabled = false;
@@ -1026,32 +1504,55 @@ async function runOperation(kind: OperationKind, requestedPreferences?: Preferen
   }
 }
 
+function stopGamePolling() {
+  window.clearInterval(gameStatusTimer);
+  gameStatusTimer = undefined;
+}
+
+function markGameStopped() {
+  if (!gameLaunching) return;
+  gameLaunching = false;
+  stopGamePolling();
+  if (snapshot) renderSnapshot(snapshot);
+}
+
+async function pollGameStatus() {
+  try {
+    if (!(await invokeCommand<boolean>("game_status"))) markGameStopped();
+  } catch {
+    // A transient failure must not fake a stop; keep showing RUNNING.
+  }
+}
+
+function startGamePolling() {
+  stopGamePolling();
+  gameStatusTimer = window.setInterval(() => void pollGameStatus(), GAME_POLL_MS);
+}
+
 async function launch() {
   if (gameLaunching || operationRunning) return;
 
-  gameLaunching = true;
-  window.clearTimeout(launchGuardTimer);
-  primaryLabel.textContent = "LAUNCHING";
-  primaryAction.disabled = true;
-  primaryAction.setAttribute("aria-busy", "true");
-  launchAction.disabled = true;
+  if (isLinux() && !protonReady()) {
+    openSettings();
+    showToast("Prepare Proton in Settings before launching.", "error");
+    return;
+  }
 
-  const finishLaunching = () => {
-    gameLaunching = false;
-    primaryAction.removeAttribute("aria-busy");
-    if (snapshot) renderSnapshot(snapshot);
-  };
+  gameLaunching = true;
+  if (snapshot) renderSnapshot(snapshot);
 
   try {
     await invokeCommand("launch_game", { installDirectory: installDirectory.value.trim() });
-    launchGuardTimer = window.setTimeout(finishLaunching, LAUNCH_GUARD_MS);
+    startGamePolling();
   } catch (error) {
-    finishLaunching();
+    markGameStopped();
     showToast(String(error), "error");
   }
 }
 
 async function closeLauncher() {
+  stopGamePolling();
+  stopProtonReconcile();
   if (operationRunning) {
     await invokeCommand<boolean>("cancel_operation").catch(() => false);
   }
@@ -1161,14 +1662,14 @@ window.addEventListener("DOMContentLoaded", () => {
       showToast("Choose an installation folder first.");
       return;
     }
-    if (primaryMode === "launch") launch();
+    if (primaryMode === "launch") void launch();
     else runOperation(primaryMode);
   });
   repairAction.addEventListener("click", () => runOperation("repair"));
   missionsAction.addEventListener("click", () => runOperation("missions"));
   launchAction.addEventListener("click", () => {
     closeSettings();
-    launch();
+    void launch();
   });
   element("#cancel-action").addEventListener("click", async () => {
     operationCancellationRequested = true;
@@ -1231,11 +1732,54 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   element("#clear-console").addEventListener("click", () => consoleOutput.replaceChildren());
+  element("#proton-refresh").addEventListener("click", () => loadProtonReleases(true));
+  element("#proton-toggle").addEventListener("click", () => {
+    const tag = protonVersion.value;
+    if (!tag) return;
+    const installed = (snapshot?.proton?.installedTags ?? []).includes(tag);
+    if (installed) void runProtonCommand("remove_proton", { tag }, "remove");
+    else void runProtonCommand("install_proton", { tag }, "install");
+  });
+  element("#proton-prepare").addEventListener("click", () => {
+    void runProtonCommand("initialize_proton_prefix", {}, "prepare");
+  });
+  protonProgressCancel.addEventListener("click", async () => {
+    if (activeProtonOperation === "remove") return;
+    protonProgressCancel.disabled = true;
+    protonProgressMessage.textContent = "Cancelling safely…";
+    try {
+      if (!(await invokeCommand<boolean>("cancel_operation"))) {
+        protonProgressCancel.disabled = false;
+        showToast("The Proton operation could not be cancelled.", "error");
+      }
+    } catch (error) {
+      protonProgressCancel.disabled = false;
+      showToast(String(error), "error");
+    }
+  });
+  element("#proton-browse").addEventListener("click", async () => {
+    const selected = await chooseInstallDirectory("/home/user/.steam/steam/compatibilitytools.d");
+    if (typeof selected === "string") {
+      protonCustomPath.value = selected;
+      await saveProtonPreferences();
+    }
+  });
+  element("#setup-proton-browse").addEventListener("click", async () => {
+    const selected = await chooseInstallDirectory("/home/user/.steam/steam/compatibilitytools.d");
+    if (typeof selected === "string") setupProtonCustom.value = selected;
+  });
+  protonVersion.addEventListener("change", () => void saveProtonPreferences());
+  protonCustomPath.addEventListener("change", () => void saveProtonPreferences());
+  protonUmuSource.addEventListener("change", () => void saveProtonPreferences());
+  launchOptions.addEventListener("change", () => void saveProtonPreferences());
+  protonGameId.addEventListener("change", () => void saveProtonPreferences());
+  protonEnv.addEventListener("change", () => void saveProtonPreferences());
+  protonDebug.addEventListener("change", () => void saveProtonPreferences());
   window.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     if (!authView.hidden) return;
     if (!setupView.hidden) closeSetup();
     else if (!settingsView.hidden) closeSettings();
   });
-  loadSnapshot();
+  void loadSnapshot().then(() => loadProtonReleases());
 });

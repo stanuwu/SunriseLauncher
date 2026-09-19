@@ -177,6 +177,74 @@
               <button class="button secondary" id="launch-action" type="button" disabled>Launch game</button>
             </div>
           </section>
+
+          <section class="settings-section proton-section" id="proton-section" hidden>
+            <div class="section-heading"><span>Proton</span><button class="refresh-button" id="proton-refresh" type="button">Refresh list</button></div>
+
+            <div class="proton-status" id="proton-status" role="status">Checking the Proton environment…</div>
+
+            <label class="setting-field" for="proton-version">
+              <span><strong>Proton version</strong><small>GE-Proton builds, fetched from GitHub</small></span>
+              <select id="proton-version"></select>
+            </label>
+
+            <label class="setting-field" for="proton-umu-source">
+              <span><strong>umu-launcher</strong><small>Managed download, or the one already installed on your system</small></span>
+              <select id="proton-umu-source">
+                <option value="managed">Managed (downloaded by the launcher)</option>
+                <option value="system">System (umu-run on PATH)</option>
+              </select>
+            </label>
+
+            <div class="settings-actions proton-actions">
+              <button class="button secondary" id="proton-toggle" type="button">Download</button>
+              <button class="button secondary" id="proton-prepare" type="button">Prepare environment</button>
+            </div>
+
+            <div class="proton-progress" id="proton-progress" hidden>
+              <div class="operation-copy">
+                <span id="proton-progress-kind">DOWNLOADING PROTON</span>
+                <div class="operation-current">
+                  <strong id="proton-progress-message">Starting…</strong>
+                  <b id="proton-progress-percent">0%</b>
+                  <button class="operation-cancel" id="proton-progress-cancel" type="button" aria-label="Cancel Proton operation" title="Cancel">×</button>
+                </div>
+              </div>
+              <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="proton-progress-fill"></div></div>
+            </div>
+
+            <label class="setting-field" for="proton-custom-path">
+              <span><strong>Custom Proton folder</strong><small>Optional; overrides the managed build</small></span>
+              <span class="input-group">
+                <input id="proton-custom-path" type="text" spellcheck="false" placeholder="Leave empty to use the managed build" autocomplete="off" />
+                <button id="proton-browse" class="input-button" type="button">Browse</button>
+              </span>
+            </label>
+
+            <label class="setting-field" for="launch-options">
+              <span><strong>Launch options</strong><small>Like Steam; %command% is replaced with the game command</small></span>
+              <input id="launch-options" type="text" spellcheck="false" placeholder="e.g. mangohud gamemoderun %command%" autocomplete="off" />
+            </label>
+
+            <details class="auth-console" id="proton-advanced">
+              <summary>Advanced</summary>
+              <label class="setting-field" for="proton-game-id">
+                <span><strong>umu game ID</strong><small>Used for protonfix lookup</small></span>
+                <input id="proton-game-id" type="text" spellcheck="false" placeholder="sunrise" autocomplete="off" />
+              </label>
+              <label class="setting-field" for="proton-env">
+                <span><strong>Extra environment</strong><small>One KEY=value per line</small></span>
+                <textarea id="proton-env" rows="3" spellcheck="false" placeholder="DXVK_HUD=1"></textarea>
+              </label>
+              <label class="setting-field" for="proton-debug">
+                <span><strong>Verbose Proton logging</strong><small>Sets UMU_LOG and PROTON_LOG</small></span>
+                <span class="switch">
+                  <input id="proton-debug" type="checkbox" />
+                  <span class="switch-track" aria-hidden="true"></span>
+                </span>
+              </label>
+            </details>
+          </section>
         </div>
         <footer class="dialog-footer">
           <button class="text-button" id="open-project" type="button">Project on GitHub ↗</button>
@@ -196,12 +264,13 @@
         <ol class="setup-progress" aria-label="Installation setup progress">
           <li class="current" data-setup-indicator="0"><span>01</span><div><strong>Location</strong><small>Choose a folder</small></div></li>
           <li data-setup-indicator="1"><span>02</span><div><strong>Steam</strong><small>Connect account</small></div></li>
-          <li data-setup-indicator="2"><span>03</span><div><strong>Review</strong><small>Confirm setup</small></div></li>
+          <li data-setup-indicator="2" id="setup-proton-indicator" hidden><span>03</span><div><strong>Proton</strong><small>Linux runtime</small></div></li>
+          <li data-setup-indicator="3"><span>03</span><div><strong>Review</strong><small>Confirm setup</small></div></li>
         </ol>
 
         <div class="setup-pages">
           <section class="setup-page" data-setup-page="0">
-            <p class="setup-kicker">Step 1 of 3</p>
+            <p class="setup-kicker" id="setup-kicker-location">Step 1 of 3</p>
             <h3>Choose the installation location</h3>
             <p class="setup-description">Sunrise installs beside this launcher by default. Choose another folder if needed.</p>
             <label class="setting-field setup-field" for="setup-install-directory">
@@ -215,7 +284,7 @@
           </section>
 
           <section class="setup-page" data-setup-page="1" hidden>
-            <p class="setup-kicker">Step 2 of 3</p>
+            <p class="setup-kicker" id="setup-kicker-steam">Step 2 of 3</p>
             <h3>Connect Steam</h3>
             <p class="setup-description">Enter the account name used to sign into Steam. DepotDownloader handles authentication.</p>
             <div class="setup-steam-fields">
@@ -254,8 +323,26 @@
             </div>
           </section>
 
-          <section class="setup-page" data-setup-page="2" hidden>
-            <p class="setup-kicker">Step 3 of 3</p>
+          <section class="setup-page" data-setup-page="2" hidden id="setup-proton-page">
+            <p class="setup-kicker" id="setup-kicker-proton">Step 3 of 4</p>
+            <h3>Choose a Proton version</h3>
+            <p class="setup-description">Sunrise runs the Windows build of Destiny 2 through Proton. Pick a GE-Proton build to download, or point at one you already have.</p>
+            <label class="setting-field setup-field" for="setup-proton-version">
+              <span><strong>Proton version</strong><small id="setup-proton-hint">Loading available builds…</small></span>
+              <select id="setup-proton-version"></select>
+            </label>
+            <label class="setting-field setup-field" for="setup-proton-custom">
+              <span><strong>Custom Proton folder</strong><small>Optional; leave empty to use the managed build</small></span>
+              <span class="input-group">
+                <input id="setup-proton-custom" type="text" spellcheck="false" placeholder="Leave empty to download" autocomplete="off" />
+                <button id="setup-proton-browse" class="input-button" type="button">Browse</button>
+              </span>
+            </label>
+            <p class="setup-path-status" id="setup-proton-status" role="status" hidden><strong>Proton is ready.</strong><span>Sunrise will launch through umu-launcher.</span></p>
+          </section>
+
+          <section class="setup-page" data-setup-page="3" hidden id="setup-review-page">
+            <p class="setup-kicker" id="setup-kicker-review">Step 3 of 3</p>
             <h3 id="setup-review-title" tabindex="-1">Ready to install</h3>
             <p class="setup-description" id="setup-review-description">Confirm the destination and Steam account before downloading.</p>
             <dl class="setup-review">
@@ -264,6 +351,7 @@
               <div><dt>Language</dt><dd id="setup-review-language">English</dd></div>
               <div><dt>Steam account</dt><dd id="setup-review-username">—</dd></div>
               <div><dt>Sign-in</dt><dd id="setup-review-auth">QR code</dd></div>
+              <div id="setup-review-proton-row" hidden><dt>Proton</dt><dd id="setup-review-proton">—</dd></div>
               <div><dt>Disk space</dt><dd id="setup-review-space">Approximately 110 GiB</dd></div>
               <div><dt>Sunrise release</dt><dd id="setup-review-release">Checking…</dd></div>
             </dl>
