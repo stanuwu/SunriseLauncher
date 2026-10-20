@@ -8,12 +8,14 @@ mod github;
 mod installer;
 mod missions;
 mod models;
+// Proton only runs on Linux; the tests exercise it everywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod proton;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod proton_launch;
 mod storage;
 
 use tauri::{Manager, WebviewWindow};
-use tokio::sync::Mutex;
 
 // The layout is drawn for this window size in logical pixels; larger windows zoom it.
 const DESIGN_WIDTH: f64 = 1180.0;
@@ -34,12 +36,14 @@ fn fit_zoom(window: &WebviewWindow) {
 pub fn run() {
     tauri::Builder::default()
         .manage(commands::OperationState::default())
-        .manage(proton::ProcessTracker {
-            processes: Mutex::new(Vec::new()),
-        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Only the Proton launch tracks the game process.
+            #[cfg(target_os = "linux")]
+            app.manage(proton::ProcessTracker {
+                processes: tokio::sync::Mutex::new(Vec::new()),
+            });
             if let Some(window) = app.get_webview_window("main") {
                 fit_zoom(&window);
             }

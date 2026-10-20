@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(target_os = "linux")]
 use tauri::Manager;
 use tauri::{AppHandle, State, ipc::Channel};
 use tokio::io::AsyncWriteExt;
@@ -16,9 +17,11 @@ use crate::github::GitHubClient;
 use crate::installer;
 use crate::models::{
     AppSnapshot, InstallationSnapshot, OperationEvent, OperationRequest, OperationResult,
-    Preferences, ProtonRelease, ProtonSource, ProtonStatus, UmuSource, current_platform,
-    resolve_language,
+    Preferences, ProtonRelease, ProtonStatus, current_platform, resolve_language,
 };
+#[cfg(target_os = "linux")]
+use crate::models::{ProtonSource, UmuSource};
+#[cfg(target_os = "linux")]
 use crate::proton;
 use crate::storage;
 
@@ -447,8 +450,9 @@ pub async fn launch_game(app: AppHandle, install_directory: String) -> AppResult
     }
     #[cfg(windows)]
     {
+        let _ = app;
         let root = std::path::PathBuf::from(install_directory.trim());
-        launch_windows(&app, &root)
+        launch_windows(&root)
     }
     #[cfg(target_os = "macos")]
     {
@@ -467,27 +471,31 @@ pub async fn launch_game(app: AppHandle, install_directory: String) -> AppResult
     }
 }
 
+/// Whether a game started by the launcher still runs. Only the Linux launch tracks it.
 #[tauri::command]
 pub fn game_status(app: AppHandle) -> AppResult<bool> {
-    Ok(app.state::<proton::ProcessTracker>().has_running())
+    #[cfg(target_os = "linux")]
+    {
+        Ok(app.state::<proton::ProcessTracker>().has_running())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        Ok(false)
+    }
 }
 
 #[cfg(windows)]
-fn launch_windows(app: &AppHandle, root: &Path) -> AppResult<()> {
+fn launch_windows(root: &Path) -> AppResult<()> {
     let executable = root.join(crate::models::GAME_EXECUTABLE);
     if !executable.is_file() {
         return Err(AppError::message(
             "destiny2.exe was not found in the installation folder.",
         ));
     }
-    let child = std::process::Command::new(executable)
+    std::process::Command::new(executable)
         .current_dir(root)
         .spawn()
         .map_err(|error| AppError::io("Destiny 2 could not be launched", error))?;
-    app.state::<proton::ProcessTracker>()
-        .processes
-        .try_lock()
-        .map_err(|_error| AppError::message("Failed to lock processes"))?
-        .push(child);
     Ok(())
 }

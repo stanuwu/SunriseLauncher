@@ -807,6 +807,7 @@ fn extract_tar<R: Read>(reader: R, destination: &Path) -> AppResult<()> {
             std::io::copy(&mut entry, &mut file)
                 .map_err(|error| AppError::io("Could not extract a file", error))?;
 
+            #[cfg(unix)]
             if let Ok(mode) = entry.header().mode() {
                 use std::os::unix::fs::PermissionsExt;
                 if let Ok(metadata) = file.metadata() {
@@ -869,10 +870,9 @@ fn create_symlink(_target: &Path, _output: &Path) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Mutex, ProcessTracker, asset_arch, extract_tar_gz, natural_cmp, sanitize_name,
-        select_asset, single_root,
-    };
+    #[cfg(unix)]
+    use super::{Mutex, ProcessTracker};
+    use super::{asset_arch, extract_tar_gz, natural_cmp, sanitize_name, select_asset, single_root};
     use crate::models::{ReleaseAsset, ReleaseSummary};
 
     fn release(assets: Vec<(&str, u64)>) -> ReleaseSummary {

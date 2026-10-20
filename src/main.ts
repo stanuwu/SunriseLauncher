@@ -218,6 +218,7 @@ let statusTimer: number | undefined;
 let setupInspectionTimer: number | undefined;
 let toastTimer: number | undefined;
 let operationHideTimer: number | undefined;
+let launchGuardTimer: number | undefined;
 let gameStatusTimer: number | undefined;
 let authHideTimer: number | undefined;
 let mockOperationCancelled = false;
@@ -231,6 +232,7 @@ let protonReconcileTimer: number | undefined;
 let lastConsoleLine: string | null = null;
 const isLinux = () => snapshot?.platform.os === "linux";
 const GAME_POLL_MS = 1000;
+const LAUNCH_GUARD_MS = 4000;
 const inTauri = "__TAURI_INTERNALS__" in window;
 const appWindow = inTauri ? getCurrentWindow() : null;
 const mockQrRows = [
@@ -767,9 +769,11 @@ function renderSnapshot(data: AppSnapshot) {
     primaryLabel.textContent = "INSTALL";
   }
 
-  if (gameLaunching) {
+  if (gameLaunching && isLinux()) {
     primaryMode = "launch";
     primaryLabel.textContent = "RUNNING";
+  } else if (gameLaunching && primaryMode === "launch") {
+    primaryLabel.textContent = "LAUNCHING";
   }
 
   const supported = data.platform.level !== "unsupported";
@@ -777,7 +781,7 @@ function renderSnapshot(data: AppSnapshot) {
   repairAction.disabled = operationRunning || gameLaunching || !data.installation.gameFound;
   missionsAction.disabled = repairAction.disabled;
   launchAction.disabled = operationRunning || gameLaunching || !data.installation.gameFound || !canLaunch();
-  launchAction.textContent = gameLaunching ? "Running" : "Launch game";
+  launchAction.textContent = gameLaunching && isLinux() ? "Running" : "Launch game";
   renderProton();
 }
 
@@ -1513,6 +1517,8 @@ function markGameStopped() {
   if (!gameLaunching) return;
   gameLaunching = false;
   stopGamePolling();
+  window.clearTimeout(launchGuardTimer);
+  primaryAction.removeAttribute("aria-busy");
   if (snapshot) renderSnapshot(snapshot);
 }
 
@@ -1539,11 +1545,15 @@ async function launch() {
   }
 
   gameLaunching = true;
+  window.clearTimeout(launchGuardTimer);
+  primaryAction.setAttribute("aria-busy", "true");
   if (snapshot) renderSnapshot(snapshot);
 
   try {
     await invokeCommand("launch_game", { installDirectory: installDirectory.value.trim() });
-    startGamePolling();
+    // Only the Linux launch tracks the game process; elsewhere a short guard blocks a double launch.
+    if (isLinux()) startGamePolling();
+    else launchGuardTimer = window.setTimeout(markGameStopped, LAUNCH_GUARD_MS);
   } catch (error) {
     markGameStopped();
     showToast(String(error), "error");
