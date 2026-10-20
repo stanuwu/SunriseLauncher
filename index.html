@@ -76,7 +76,7 @@
       <div class="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <header class="dialog-header">
           <div><span>Project Sunrise</span><h2 id="settings-title" tabindex="-1">Settings</h2></div>
-          <button class="close-button" id="close-settings" type="button" aria-label="Close settings">×</button>
+          <ui-close-button id="close-settings" aria-label="Close Settings"></ui-close-button>
         </header>
 
         <div class="settings-grid">
@@ -190,7 +190,7 @@
       <div class="dialog setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title">
         <header class="dialog-header">
           <div><h2 id="setup-title">Install Sunrise</h2></div>
-          <button class="close-button" id="close-setup" type="button" aria-label="Close installation setup">×</button>
+          <ui-close-button id="close-setup" aria-label="Close installation setup"></ui-close-button>
         </header>
 
         <ol class="setup-progress" aria-label="Installation setup progress">
@@ -243,8 +243,14 @@
               </label>
             </div>
             <p class="language-warning setup-language-warning" id="setup-language-warning" hidden>Non-English installations may be harder to troubleshoot. English is recommended when requesting support.</p>
+            <label class="setting-field setup-field">
+              <span>
+                <strong>Sign-in method</strong>
+                <small>How you will authenticate your Steam account</small>
+              </span>
+            </label>
             <fieldset class="auth-choice">
-              <legend>Sign-in method</legend>
+              
               <label><input type="radio" name="setup-auth-method" value="qr" checked /><span><strong>QR code</strong><small>Scan with Steam Mobile</small></span></label>
               <label><input type="radio" name="setup-auth-method" value="twoFactor" /><span><strong>Steam Guard code</strong><small>Enter password and 2FA</small></span></label>
             </fieldset>
