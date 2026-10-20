@@ -872,7 +872,9 @@ fn create_symlink(_target: &Path, _output: &Path) -> AppResult<()> {
 mod tests {
     #[cfg(unix)]
     use super::{Mutex, ProcessTracker};
-    use super::{asset_arch, extract_tar_gz, natural_cmp, sanitize_name, select_asset, single_root};
+    use super::{
+        asset_arch, extract_tar_gz, natural_cmp, sanitize_name, select_asset, single_root,
+    };
     use crate::models::{ReleaseAsset, ReleaseSummary};
 
     fn release(assets: Vec<(&str, u64)>) -> ReleaseSummary {
