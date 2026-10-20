@@ -1,8 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(target_os = "linux")]
+use tauri::Manager;
 use tauri::{AppHandle, State, ipc::Channel};
 use tokio::io::AsyncWriteExt;
 use tokio::process::ChildStdin;
@@ -15,13 +17,18 @@ use crate::github::GitHubClient;
 use crate::installer;
 use crate::models::{
     AppSnapshot, InstallationSnapshot, OperationEvent, OperationRequest, OperationResult,
-    Preferences, current_platform, resolve_language,
+    Preferences, ProtonRelease, ProtonStatus, current_platform, resolve_language,
 };
+#[cfg(target_os = "linux")]
+use crate::models::{ProtonSource, UmuSource};
+#[cfg(target_os = "linux")]
+use crate::proton;
 use crate::storage;
 
 #[derive(Default)]
 pub struct OperationState {
     active: AtomicBool,
+    proton_active: AtomicBool,
     cancel: Mutex<Option<CancellationToken>>,
     terminal_input: Arc<AsyncMutex<Option<ChildStdin>>>,
 }
@@ -35,6 +42,40 @@ impl OperationState {
         } else {
             false
         }
+    }
+}
+
+/// Claims the single-operation slot and releases it on drop, so an early
+/// return or a panic can never leave the launcher permanently "busy".
+struct ActiveOperation<'a> {
+    state: &'a OperationState,
+    proton: bool,
+}
+
+impl<'a> ActiveOperation<'a> {
+    fn begin(state: &'a OperationState, proton: bool) -> AppResult<Self> {
+        if state
+            .active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(AppError::message(
+                "Another installer operation is already running.",
+            ));
+        }
+        if proton {
+            state.proton_active.store(true, Ordering::Release);
+        }
+        Ok(Self { state, proton })
+    }
+}
+
+impl Drop for ActiveOperation<'_> {
+    fn drop(&mut self) {
+        if self.proton {
+            self.state.proton_active.store(false, Ordering::Release);
+        }
+        self.state.active.store(false, Ordering::Release);
     }
 }
 
@@ -95,6 +136,7 @@ pub async fn get_app_snapshot(app: AppHandle) -> AppResult<AppSnapshot> {
     if let Some(status) = crossover.as_ref() {
         platform.can_launch = status.ready;
     }
+    let proton = proton_status(&app, &preferences);
     Ok(AppSnapshot {
         platform,
         preferences,
@@ -103,6 +145,7 @@ pub async fn get_app_snapshot(app: AppHandle) -> AppResult<AppSnapshot> {
         update_available,
         release_error,
         crossover,
+        proton,
     })
 }
 
@@ -148,9 +191,131 @@ pub async fn prepare_crossover(
         })?
 }
 
+#[cfg(target_os = "linux")]
+fn proton_status(app: &AppHandle, preferences: &Preferences) -> Option<ProtonStatus> {
+    match proton::status(app, preferences) {
+        Ok(status) => Some(status),
+        Err(error) => Some(ProtonStatus {
+            supported: true,
+            umu_available: false,
+            umu_version: None,
+            umu_source: None,
+            selected_tag: None,
+            proton_path: None,
+            installed_tags: Vec::new(),
+            prefix_path: String::new(),
+            prefix_initialized: false,
+            ready: false,
+            error: Some(error.to_string()),
+        }),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn proton_status(_app: &AppHandle, _preferences: &Preferences) -> Option<ProtonStatus> {
+    None
+}
+
+#[tauri::command]
+pub async fn get_proton_status(
+    app: AppHandle,
+    preferences: Preferences,
+) -> AppResult<Option<ProtonStatus>> {
+    Ok(proton_status(&app, &preferences))
+}
+
+#[tauri::command]
+pub async fn list_proton_releases(app: AppHandle, refresh: bool) -> AppResult<Vec<ProtonRelease>> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, refresh);
+        return Err(AppError::message("Proton is only available on Linux."));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if !refresh && let Some(cached) = proton::load_cached_catalog(&app).await? {
+            return Ok(cached);
+        }
+        proton::refresh_catalog(&app, &GitHubClient::new()?).await
+    }
+}
+
 #[tauri::command]
 pub async fn inspect_installation(install_directory: String) -> AppResult<InstallationSnapshot> {
     storage::inspect_installation(&install_directory).await
+}
+
+#[tauri::command]
+pub async fn install_proton(
+    app: AppHandle,
+    state: State<'_, OperationState>,
+    tag: String,
+    on_event: Channel<OperationEvent>,
+) -> AppResult<ProtonStatus> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, state, tag, on_event);
+        return Err(AppError::message("Proton is only available on Linux."));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _active = ActiveOperation::begin(state.inner(), true)?;
+        let cancel = CancellationToken::new();
+        *state
+            .cancel
+            .lock()
+            .expect("operation cancel mutex poisoned") = Some(cancel.clone());
+
+        let result = async {
+            let github = GitHubClient::new()?;
+            let mut preferences = storage::load_preferences(&app).await?;
+            let mut releases = proton::load_cached_catalog(&app).await?.unwrap_or_default();
+            if !releases.iter().any(|release| release.tag == tag) {
+                releases = proton::refresh_catalog(&app, &github).await?;
+            }
+            let release = releases
+                .iter()
+                .find(|release| release.tag == tag)
+                .ok_or_else(|| {
+                    AppError::message(format!("GE-Proton {tag} is not in the release list."))
+                })?;
+            if preferences.umu_source == UmuSource::Managed {
+                proton::install_umu(&app, &github, &on_event, &cancel).await?;
+            }
+            proton::install_proton(&app, &github, release, &on_event, &cancel).await?;
+            preferences.proton_source = ProtonSource::Managed;
+            preferences.proton_version = tag.clone();
+            storage::save_preferences(&app, &preferences).await?;
+            proton::status(&app, &preferences)
+        }
+        .await;
+
+        *state
+            .cancel
+            .lock()
+            .expect("operation cancel mutex poisoned") = None;
+        result
+    }
+}
+
+#[tauri::command]
+pub async fn remove_proton(
+    app: AppHandle,
+    state: State<'_, OperationState>,
+    tag: String,
+) -> AppResult<ProtonStatus> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, state, tag);
+        return Err(AppError::message("Proton is only available on Linux."));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _active = ActiveOperation::begin(state.inner(), true)?;
+        proton::remove_proton(&app, &tag)?;
+        let preferences = storage::load_preferences(&app).await?;
+        proton::status(&app, &preferences)
+    }
 }
 
 #[tauri::command]
@@ -168,15 +333,7 @@ pub async fn run_operation(
     request: OperationRequest,
     on_event: Channel<OperationEvent>,
 ) -> AppResult<OperationResult> {
-    if state
-        .active
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return Err(AppError::message(
-            "Another installer operation is already running.",
-        ));
-    }
+    let _active = ActiveOperation::begin(state.inner(), false)?;
 
     let cancel = CancellationToken::new();
     *state
@@ -209,7 +366,6 @@ pub async fn run_operation(
         .cancel
         .lock()
         .expect("operation cancel mutex poisoned") = None;
-    state.active.store(false, Ordering::Release);
     result
 }
 
@@ -241,31 +397,91 @@ pub async fn send_terminal_input(
 }
 
 #[tauri::command]
+pub async fn initialize_proton_prefix(
+    app: AppHandle,
+    state: State<'_, OperationState>,
+    on_event: Channel<OperationEvent>,
+) -> AppResult<ProtonStatus> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, state, on_event);
+        return Err(AppError::message("Proton is only available on Linux."));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _active = ActiveOperation::begin(state.inner(), true)?;
+        let cancel = CancellationToken::new();
+        *state
+            .cancel
+            .lock()
+            .expect("operation cancel mutex poisoned") = Some(cancel.clone());
+
+        let result = async {
+            let preferences = storage::load_preferences(&app).await?;
+            proton::initialize_prefix(&app, &preferences, &on_event, &cancel).await?;
+            proton::status(&app, &preferences)
+        }
+        .await;
+
+        *state
+            .cancel
+            .lock()
+            .expect("operation cancel mutex poisoned") = None;
+        result
+    }
+}
+
+#[tauri::command]
 pub fn cancel_operation(state: State<'_, OperationState>) -> bool {
     state.cancel_active()
 }
 
 #[tauri::command]
+pub fn proton_operation_active(state: State<'_, OperationState>) -> bool {
+    state.proton_active.load(Ordering::Acquire)
+}
+
+#[tauri::command]
 pub async fn launch_game(app: AppHandle, install_directory: String) -> AppResult<()> {
-    let root = PathBuf::from(install_directory.trim());
+    #[cfg(target_os = "linux")]
+    {
+        let preferences = storage::load_preferences(&app).await?;
+        proton::launch(&app, &preferences, &install_directory)
+    }
     #[cfg(windows)]
     {
         let _ = app;
+        let root = std::path::PathBuf::from(install_directory.trim());
         launch_windows(&root)
     }
     #[cfg(target_os = "macos")]
     {
+        let root = std::path::PathBuf::from(install_directory.trim());
         let preferences = storage::load_preferences(&app).await?;
         tauri::async_runtime::spawn_blocking(move || crossover::launch(&root, &preferences))
             .await
             .map_err(|error| AppError::message(format!("The launch was interrupted: {error}")))?
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
-        let _ = (app, root);
+        let _ = (app, install_directory);
         Err(AppError::message(
-            "Launching is currently supported on Windows and macOS only. Proton launch configuration is not implemented yet.",
+            "Launching is supported on Windows, macOS and Linux only.",
         ))
+    }
+}
+
+/// Whether a game started by the launcher still runs. Only the Linux launch tracks it.
+#[tauri::command]
+pub fn game_status(app: AppHandle) -> AppResult<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(app.state::<proton::ProcessTracker>().has_running())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        Ok(false)
     }
 }
 

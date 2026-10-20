@@ -8,6 +8,11 @@ mod github;
 mod installer;
 mod missions;
 mod models;
+// Proton only runs on Linux; the tests exercise it everywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod proton;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod proton_launch;
 mod storage;
 
 use tauri::{Manager, WebviewWindow};
@@ -34,6 +39,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Only the Proton launch tracks the game process.
+            #[cfg(target_os = "linux")]
+            app.manage(proton::ProcessTracker {
+                processes: tokio::sync::Mutex::new(Vec::new()),
+            });
             if let Some(window) = app.get_webview_window("main") {
                 fit_zoom(&window);
             }
@@ -61,10 +71,17 @@ pub fn run() {
             commands::get_app_snapshot,
             commands::inspect_installation,
             commands::save_preferences,
+            commands::get_proton_status,
+            commands::list_proton_releases,
+            commands::install_proton,
+            commands::remove_proton,
+            commands::initialize_proton_prefix,
             commands::run_operation,
             commands::send_terminal_input,
             commands::cancel_operation,
+            commands::proton_operation_active,
             commands::launch_game,
+            commands::game_status,
             commands::get_crossover_status,
             commands::prepare_crossover,
         ])

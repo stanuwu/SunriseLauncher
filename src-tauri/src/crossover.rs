@@ -384,7 +384,9 @@ mod tests {
     #[test]
     fn launch_arguments_pass_a_native_path_and_do_not_wait() {
         let root = Path::new("/Users/guardian/Games/Sunrise");
-        let args = launch_args("Sunrise", root, &root.join("destiny2.exe"));
+        let executable = root.join("destiny2.exe");
+        let args = launch_args("Sunrise", root, &executable);
+        // The join uses the host's separator, so the test compares against the same join.
         assert_eq!(
             args,
             [
@@ -393,8 +395,8 @@ mod tests {
                 "--no-update",
                 "--no-wait",
                 "--workdir",
-                "/Users/guardian/Games/Sunrise",
-                "/Users/guardian/Games/Sunrise/destiny2.exe"
+                &*root.to_string_lossy(),
+                &*executable.to_string_lossy()
             ]
         );
         // --cx-app would make CrossOver look inside the bottle's C: drive instead.

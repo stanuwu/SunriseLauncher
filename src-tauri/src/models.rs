@@ -118,6 +118,25 @@ pub struct Preferences {
     pub crossover_bottle: String,
     #[serde(default = "default_crossover_backend")]
     pub crossover_backend: String,
+    // Proton settings; only meaningful on Linux and ignored elsewhere.
+    #[serde(default)]
+    pub proton_version: String,
+    #[serde(default)]
+    pub proton_source: ProtonSource,
+    #[serde(default)]
+    pub proton_custom_path: String,
+    #[serde(default)]
+    pub umu_source: UmuSource,
+    #[serde(default)]
+    pub proton_prefix: String,
+    #[serde(default)]
+    pub launch_options: String,
+    #[serde(default = "default_game_id")]
+    pub game_id: String,
+    #[serde(default)]
+    pub env_overrides: String,
+    #[serde(default)]
+    pub proton_debug_logging: bool,
 }
 
 impl Default for Preferences {
@@ -129,6 +148,15 @@ impl Default for Preferences {
             auth_method: AuthMethod::default(),
             crossover_bottle: default_crossover_bottle(),
             crossover_backend: default_crossover_backend(),
+            proton_version: String::new(),
+            proton_source: ProtonSource::default(),
+            proton_custom_path: String::new(),
+            umu_source: UmuSource::default(),
+            proton_prefix: String::new(),
+            launch_options: String::new(),
+            game_id: default_game_id(),
+            env_overrides: String::new(),
+            proton_debug_logging: false,
         }
     }
 }
@@ -139,6 +167,22 @@ fn default_crossover_bottle() -> String {
 
 fn default_crossover_backend() -> String {
     crate::crossover::DEFAULT_BACKEND.into()
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProtonSource {
+    #[default]
+    Managed,
+    Custom,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UmuSource {
+    #[default]
+    Managed,
+    System,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -167,6 +211,25 @@ pub struct ReleaseInfo {
     pub download_url: String,
     pub size: u64,
     pub digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseAsset {
+    pub name: String,
+    pub download_url: String,
+    pub size: u64,
+    pub digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseSummary {
+    pub tag: String,
+    pub name: String,
+    pub prerelease: bool,
+    pub published_at: Option<DateTime<Utc>>,
+    pub assets: Vec<ReleaseAsset>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -202,6 +265,10 @@ fn steam_app_id() -> u32 {
 
 fn default_steam_language() -> String {
     "english".into()
+}
+
+fn default_game_id() -> String {
+    "sunrise".into()
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -271,6 +338,40 @@ pub struct AppSnapshot {
     pub release_error: Option<String>,
     /// Present only on macOS; `None` everywhere else.
     pub crossover: Option<crate::crossover::CrossOverStatus>,
+    /// Present only on Linux; `None` everywhere else.
+    pub proton: Option<ProtonStatus>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtonRelease {
+    pub tag: String,
+    pub asset_name: String,
+    pub download_url: String,
+    pub size: u64,
+    pub digest: Option<String>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub prerelease: bool,
+    pub installed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtonStatus {
+    pub supported: bool,
+    pub umu_available: bool,
+    pub umu_version: Option<String>,
+    /// "managed" when we supply umu-run, "system" when it came from `PATH`.
+    pub umu_source: Option<String>,
+    pub selected_tag: Option<String>,
+    pub proton_path: Option<String>,
+    pub installed_tags: Vec<String>,
+    pub prefix_path: String,
+    pub prefix_initialized: bool,
+    /// Whether the selected Proton is usable for a launch right now.
+    pub ready: bool,
+    /// A blocking problem to show the user, if any.
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -369,8 +470,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        AuthMethod, InstallationSnapshot, InstallerState, LANGUAGES, Preferences, ReleaseInfo,
-        depots_for, resolve_language,
+        AuthMethod, InstallationSnapshot, InstallerState, LANGUAGES, Preferences, ProtonSource,
+        ReleaseInfo, UmuSource, depots_for, resolve_language,
     };
 
     fn installed_snapshot(digest: Option<&str>) -> InstallationSnapshot {
@@ -447,6 +548,52 @@ mod tests {
         assert_eq!(preferences.auth_method, AuthMethod::TwoFactor);
         assert_eq!(preferences.crossover_bottle, "Sunrise");
         assert_eq!(preferences.crossover_backend, "d3dmetal");
+    }
+
+    #[test]
+    fn preferences_written_before_proton_support_still_load() {
+        let preferences: Preferences = serde_json::from_str(
+            r#"{
+                "installDirectory": "C:\\Games\\Project Sunrise",
+                "steamUsername": "guardian",
+                "steamLanguage": "french",
+                "authMethod": "twoFactor"
+            }"#,
+        )
+        .expect("legacy preferences should remain compatible");
+
+        assert_eq!(preferences.steam_language, "french");
+        assert_eq!(preferences.auth_method, AuthMethod::TwoFactor);
+        assert_eq!(preferences.proton_source, ProtonSource::Managed);
+        assert_eq!(preferences.umu_source, UmuSource::Managed);
+        assert_eq!(preferences.game_id, "sunrise");
+        assert!(preferences.proton_version.is_empty());
+        assert!(preferences.proton_custom_path.is_empty());
+        assert!(preferences.proton_prefix.is_empty());
+        assert!(preferences.launch_options.is_empty());
+        assert!(preferences.env_overrides.is_empty());
+    }
+
+    #[test]
+    fn proton_preferences_round_trip() {
+        let preferences = Preferences {
+            proton_version: "GE-Proton11-7".into(),
+            proton_source: ProtonSource::Custom,
+            proton_custom_path: "/opt/proton".into(),
+            umu_source: UmuSource::System,
+            proton_prefix: "/games/sunrise-prefix".into(),
+            launch_options: "mangohud %command% -novid".into(),
+            game_id: "sunrise".into(),
+            env_overrides: "DXVK_HUD=1".into(),
+            ..Preferences::default()
+        };
+        let bytes = serde_json::to_vec(&preferences).expect("serialize");
+        let parsed: Preferences = serde_json::from_slice(&bytes).expect("deserialize");
+        assert_eq!(parsed.proton_version, "GE-Proton11-7");
+        assert_eq!(parsed.proton_source, ProtonSource::Custom);
+        assert_eq!(parsed.umu_source, UmuSource::System);
+        assert_eq!(parsed.launch_options, "mangohud %command% -novid");
+        assert_eq!(parsed.env_overrides, "DXVK_HUD=1");
     }
 
     #[test]

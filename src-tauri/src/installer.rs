@@ -591,18 +591,18 @@ pub(crate) fn extract_zip(archive_path: &Path, destination: &Path) -> AppResult<
 }
 
 #[cfg(unix)]
-fn make_executable(path: &Path) -> AppResult<()> {
+pub(crate) fn make_executable(path: &Path) -> AppResult<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut permissions = std::fs::metadata(path)
-        .map_err(|error| AppError::io("Could not inspect DepotDownloader", error))?
+        .map_err(|error| AppError::io("Could not inspect file", error))?
         .permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(path, permissions)
-        .map_err(|error| AppError::io("Could not make DepotDownloader executable", error))
+        .map_err(|error| AppError::io("Could not make file executable", error))
 }
 
 #[cfg(not(unix))]
-fn make_executable(_path: &Path) -> AppResult<()> {
+pub(crate) fn make_executable(_path: &Path) -> AppResult<()> {
     Ok(())
 }
 
