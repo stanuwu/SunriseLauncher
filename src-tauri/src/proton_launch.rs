@@ -25,6 +25,16 @@ pub struct LaunchPlan {
     pub wrappers: Vec<String>,
 }
 
+/// Command line built from the user's launch options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchArgv {
+    pub argv: Vec<String>,
+    pub style: LaunchOptionStyle,
+    pub wrappers: Vec<String>,
+    /// Leading KEY=value tokens before a `%command%` placeholder.
+    pub env: Vec<(String, String)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchToken {
     pub text: String,
@@ -125,16 +135,7 @@ fn shell_command(argv: &[String]) -> String {
         .join(" ")
 }
 
-pub fn build_argv(
-    program: &str,
-    game_args: &[String],
-    options: &str,
-) -> AppResult<(
-    Vec<String>,
-    LaunchOptionStyle,
-    Vec<String>,
-    Vec<(String, String)>,
-)> {
+pub fn build_argv(program: &str, game_args: &[String], options: &str) -> AppResult<LaunchArgv> {
     let base = {
         let mut argv = vec![program.to_owned()];
         argv.extend(game_args.iter().cloned());
@@ -162,7 +163,12 @@ pub fn build_argv(
     else {
         let mut argv = base;
         argv.extend(tokens.iter().map(|token| token.text.clone()));
-        return Ok((argv, LaunchOptionStyle::Arguments, Vec::new(), env_prefix));
+        return Ok(LaunchArgv {
+            argv,
+            style: LaunchOptionStyle::Arguments,
+            wrappers: Vec::new(),
+            env: env_prefix,
+        });
     };
 
     let placeholder = &tokens[position];
@@ -184,7 +190,12 @@ pub fn build_argv(
             .map(|token| token.text.clone())
             .collect();
         wrappers.push(splice);
-        return Ok((argv, LaunchOptionStyle::Wrapper, wrappers, env_prefix));
+        return Ok(LaunchArgv {
+            argv,
+            style: LaunchOptionStyle::Wrapper,
+            wrappers,
+            env: env_prefix,
+        });
     }
 
     let mut wrappers: Vec<String> = tokens[..position]
@@ -201,7 +212,12 @@ pub fn build_argv(
             .iter()
             .map(|token| token.text.clone()),
     );
-    Ok((argv, LaunchOptionStyle::Wrapper, wrappers, env_prefix))
+    Ok(LaunchArgv {
+        argv,
+        style: LaunchOptionStyle::Wrapper,
+        wrappers,
+        env: env_prefix,
+    })
 }
 
 pub fn merge_dll_overrides(user: &str) -> String {
@@ -256,8 +272,12 @@ pub fn plan(
 ) -> AppResult<LaunchPlan> {
     let program = umu_run.to_string_lossy().into_owned();
     let exe = game_executable.to_string_lossy().into_owned();
-    let (argv, style, wrappers, env_prefix) =
-        build_argv(&program, &[exe], &preferences.launch_options)?;
+    let LaunchArgv {
+        argv,
+        style,
+        wrappers,
+        env: env_prefix,
+    } = build_argv(&program, &[exe], &preferences.launch_options)?;
 
     let mut env = BTreeMap::new();
 
@@ -317,8 +337,8 @@ pub fn plan(
 #[cfg(test)]
 mod tests {
     use super::{
-        LaunchOptionStyle, LaunchToken, STEAM_DLL_OVERRIDE, build_argv, merge_dll_overrides,
-        parse_env_overrides, plan, tokenize,
+        LaunchArgv, LaunchOptionStyle, LaunchToken, STEAM_DLL_OVERRIDE, build_argv,
+        merge_dll_overrides, parse_env_overrides, plan, tokenize,
     };
     use crate::models::Preferences;
     use std::path::Path;
@@ -358,8 +378,12 @@ mod tests {
 
     #[test]
     fn build_argv_handles_wrapper_and_quoted_placeholder() {
-        let (argv, style, wrappers, _) =
-            build_argv("umu-run", &strings(&["destiny2.exe"]), "-novid -windowed").expect("argv");
+        let LaunchArgv {
+            argv,
+            style,
+            wrappers,
+            ..
+        } = build_argv("umu-run", &strings(&["destiny2.exe"]), "-novid -windowed").expect("argv");
         assert_eq!(
             argv,
             strings(&["umu-run", "destiny2.exe", "-novid", "-windowed"])
@@ -367,7 +391,12 @@ mod tests {
         assert_eq!(style, LaunchOptionStyle::Arguments);
         assert!(wrappers.is_empty());
 
-        let (argv, style, wrappers, _) = build_argv(
+        let LaunchArgv {
+            argv,
+            style,
+            wrappers,
+            ..
+        } = build_argv(
             "umu-run",
             &strings(&["destiny2.exe"]),
             "gamemoderun mangohud %command% -novid",
@@ -386,12 +415,13 @@ mod tests {
         assert_eq!(style, LaunchOptionStyle::Wrapper);
         assert_eq!(wrappers, strings(&["gamemoderun", "mangohud", "umu-run"]));
 
-        let (argv, _, _, _) = build_argv(
+        let argv = build_argv(
             "/tools/umu/umu-run",
             &strings(&["/games/it's here/destiny2.exe"]),
             "sh -c \"%command%\"",
         )
-        .expect("argv");
+        .expect("argv")
+        .argv;
         assert_eq!(
             argv,
             strings(&[
@@ -404,7 +434,7 @@ mod tests {
 
     #[test]
     fn build_argv_extracts_leading_env_assignment_only_in_wrapper_form() {
-        let (argv, _, _, env) = build_argv(
+        let LaunchArgv { argv, env, .. } = build_argv(
             "umu-run",
             &strings(&["destiny2.exe"]),
             "NIXPKGS_ALLOW_UNFREE=1 nix-shell --run \"%command%\"",
@@ -419,13 +449,14 @@ mod tests {
             vec![("NIXPKGS_ALLOW_UNFREE".to_owned(), "1".to_owned())]
         );
 
-        let (argv, style, _, env) =
-            build_argv("umu-run", &strings(&["destiny2.exe"]), "FOO=bar").expect("argv");
+        let LaunchArgv {
+            argv, style, env, ..
+        } = build_argv("umu-run", &strings(&["destiny2.exe"]), "FOO=bar").expect("argv");
         assert_eq!(argv, strings(&["umu-run", "destiny2.exe", "FOO=bar"]));
         assert_eq!(style, LaunchOptionStyle::Arguments);
         assert!(env.is_empty());
 
-        let (argv, _, _, env) = build_argv(
+        let LaunchArgv { argv, env, .. } = build_argv(
             "umu-run",
             &strings(&["destiny2.exe"]),
             "\"FOO=bar\" sh -c \"%command%\"",

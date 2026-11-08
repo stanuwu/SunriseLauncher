@@ -1676,13 +1676,21 @@ input::placeholder {
   border: 0;
 }
 
+/* Matches the setup field headings above it. */
 .auth-choice legend {
-  margin-bottom: 8px;
+  margin-bottom: 26px;
   padding: 0;
+}
+
+.auth-choice legend strong {
+  font-size: 10px;
+}
+
+.auth-choice legend small {
+  margin-top: 4px;
   color: var(--faint);
   font-size: 8px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  line-height: 1.35;
 }
 
 .auth-choice label {

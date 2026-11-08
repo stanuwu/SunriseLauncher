@@ -1,11 +1,8 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::time::{Duration, SystemTime};
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
@@ -15,41 +12,38 @@ use crate::error::{AppError, AppResult};
 use crate::github::GitHubClient;
 use crate::installer;
 use crate::models::{
-    OperationEvent, Preferences, ProtonRelease, ProtonSource, ProtonStatus, ReleaseAsset,
-    ReleaseInfo, ReleaseSummary, UmuSource,
+    OperationEvent, Preferences, ProtonSource, ProtonStatus, ReleaseInfo, UmuSource,
 };
 use crate::storage;
 
-pub const PROTON_REPOSITORY_OWNER: &str = "GloriousEggroll";
-pub const PROTON_REPOSITORY: &str = "proton-ge-custom";
-pub const UMU_REPOSITORY_OWNER: &str = "Open-Wine-Components";
-pub const UMU_REPOSITORY: &str = "umu-launcher";
+pub const PROTON_TAG: &str = "GE-Proton11-11";
 
-const CATALOG_LIMIT: u32 = 30;
-const CATALOG_TTL: Duration = Duration::from_secs(6 * 60 * 60);
-const CATALOG_SCHEMA: u8 = 2;
+// Architecture, asset name, size in bytes and SHA-256. Bump them together with PROTON_TAG.
+const PROTON_ASSETS: [(&str, &str, u64, &str); 2] = [
+    (
+        "x86_64",
+        "GE-Proton11-11-x86_64.tar.gz",
+        564_789_552,
+        "aa85986cada5709aa8bbfa8add7f3bfb925cbe15710c98995898d308ff2ca3c1",
+    ),
+    (
+        "aarch64",
+        "GE-Proton11-11-aarch64.tar.gz",
+        648_071_663,
+        "c70eb3cc1c48a4cf1719d643c86fc069060fc6a1fecb490ec03295f2f7541ad1",
+    ),
+];
+
+const UMU_TAG: &str = "1.4.4";
+
+// Asset name, size in bytes and SHA-256 of the zipapp. Bump them together with UMU_TAG.
+const UMU_ASSET: (&str, u64, &str) = (
+    "umu-launcher-1.4.4-zipapp.tar",
+    430_080,
+    "eb590691841f7fad3fc3ad8fd5db4ccb87849fe7948e62b28ece7a4ee48cc851",
+);
 
 const LOG_FILE: &str = "umu.log";
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Catalog {
-    schema_version: u8,
-    fetched_at: DateTime<Utc>,
-    releases: Vec<CatalogEntry>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CatalogEntry {
-    tag: String,
-    asset_name: String,
-    download_url: String,
-    size: u64,
-    digest: Option<String>,
-    published_at: Option<DateTime<Utc>>,
-    prerelease: bool,
-}
 
 pub struct ProcessTracker {
     pub processes: Mutex<Vec<Child>>,
@@ -65,36 +59,38 @@ impl ProcessTracker {
     }
 }
 
-fn asset_arch() -> AppResult<&'static str> {
-    match std::env::consts::ARCH {
-        "x86_64" => Ok("x86_64"),
-        "aarch64" => Ok("aarch64"),
-        other => Err(AppError::message(format!(
-            "GE-Proton does not publish a build for the {other} architecture."
-        ))),
-    }
+fn proton_release() -> AppResult<ReleaseInfo> {
+    let arch = std::env::consts::ARCH;
+    let (_, asset_name, size, sha256) = PROTON_ASSETS
+        .into_iter()
+        .find(|asset| asset.0 == arch)
+        .ok_or_else(|| {
+            AppError::message(format!(
+                "GE-Proton does not publish a build for the {arch} architecture."
+            ))
+        })?;
+    Ok(ReleaseInfo {
+        tag: PROTON_TAG.into(),
+        asset_name: asset_name.into(),
+        download_url: format!(
+            "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/{PROTON_TAG}/{asset_name}"
+        ),
+        size,
+        digest: Some(format!("sha256:{sha256}")),
+    })
 }
 
-fn select_asset<'a>(release: &'a ReleaseSummary, arch: &str) -> Option<&'a ReleaseAsset> {
-    let suffixed = format!("-{arch}.tar.gz");
-    if let Some(asset) = release
-        .assets
-        .iter()
-        .find(|asset| asset.name.ends_with(&suffixed))
-    {
-        return Some(asset);
+fn umu_release() -> ReleaseInfo {
+    let (asset_name, size, sha256) = UMU_ASSET;
+    ReleaseInfo {
+        tag: UMU_TAG.into(),
+        asset_name: asset_name.into(),
+        download_url: format!(
+            "https://github.com/Open-Wine-Components/umu-launcher/releases/download/{UMU_TAG}/{asset_name}"
+        ),
+        size,
+        digest: Some(format!("sha256:{sha256}")),
     }
-    if arch == "x86_64" {
-        let legacy = format!("{}.tar.gz", release.tag);
-        return release.assets.iter().find(|asset| asset.name == legacy);
-    }
-    None
-}
-
-fn catalog_path(app: &AppHandle) -> AppResult<PathBuf> {
-    Ok(storage::app_data_dir(app)?
-        .join("tools")
-        .join("proton-catalog.json"))
 }
 
 pub fn proton_versions_dir(app: &AppHandle) -> AppResult<PathBuf> {
@@ -119,167 +115,15 @@ pub fn prefix_path(app: &AppHandle, preferences: &Preferences) -> AppResult<Path
     Ok(storage::app_data_dir(app)?.join("proton").join("prefix"))
 }
 
-pub fn managed_proton_path(app: &AppHandle, tag: &str) -> AppResult<PathBuf> {
-    Ok(proton_versions_dir(app)?.join(sanitize_name(tag)))
+fn managed_proton_path(app: &AppHandle) -> AppResult<PathBuf> {
+    Ok(proton_versions_dir(app)?.join(PROTON_TAG))
 }
 
-fn sanitize_name(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-// Accurately compares version-like tags for natural sorting. (proton)
-fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let mut a_chars = a.chars().peekable();
-    let mut b_chars = b.chars().peekable();
-    loop {
-        return match (a_chars.peek(), b_chars.peek()) {
-            (None, None) => std::cmp::Ordering::Equal,
-            (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(_), None) => std::cmp::Ordering::Greater,
-            (Some(ac), Some(bc)) if ac.is_ascii_digit() && bc.is_ascii_digit() => {
-                match take_number(&mut a_chars).cmp(&take_number(&mut b_chars)) {
-                    std::cmp::Ordering::Equal => continue,
-                    other => other,
-                }
-            }
-            _ => match a_chars.next().cmp(&b_chars.next()) {
-                std::cmp::Ordering::Equal => continue,
-                other => other,
-            },
-        };
-    }
-}
-
-fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
-    let mut value: u128 = 0;
-    while let Some(character) = chars.peek() {
-        let Some(digit) = character.to_digit(10) else {
-            break;
-        };
-        value = value.saturating_mul(10).saturating_add(u128::from(digit));
-        chars.next();
-    }
-    value
-}
-
-fn sort_tags_newest_first(tags: &mut [String]) {
-    tags.sort_by(|a, b| natural_cmp(a, b));
-    tags.reverse();
-}
-
-pub fn installed_tags(app: &AppHandle) -> AppResult<Vec<String>> {
-    let root = proton_versions_dir(app)?;
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return Ok(Vec::new());
-    };
-    let mut tags = entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect::<Vec<_>>();
-    sort_tags_newest_first(&mut tags);
-    Ok(tags)
-}
-
-pub async fn load_cached_catalog(app: &AppHandle) -> AppResult<Option<Vec<ProtonRelease>>> {
-    let path = catalog_path(app)?;
-    let Ok(bytes) = tokio::fs::read(&path).await else {
-        return Ok(None);
-    };
-    let Ok(catalog) = serde_json::from_slice::<Catalog>(&bytes) else {
-        return Ok(None);
-    };
-    if catalog.schema_version != CATALOG_SCHEMA {
-        return Ok(None);
-    }
-    let age = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .saturating_sub(catalog.fetched_at.timestamp().max(0) as u64);
-    if age > CATALOG_TTL.as_secs() {
-        return Ok(None);
-    }
-    Ok(Some(entries_to_releases(app, catalog.releases)?))
-}
-
-pub async fn refresh_catalog(
-    app: &AppHandle,
-    github: &GitHubClient,
-) -> AppResult<Vec<ProtonRelease>> {
-    let arch = asset_arch()?;
-    let summaries = github
-        .releases(PROTON_REPOSITORY_OWNER, PROTON_REPOSITORY, CATALOG_LIMIT)
-        .await?;
-
-    let entries = summaries
-        .iter()
-        .filter_map(|release| {
-            let asset = select_asset(release, arch)?;
-            Some(CatalogEntry {
-                tag: release.tag.clone(),
-                asset_name: asset.name.clone(),
-                download_url: asset.download_url.clone(),
-                size: asset.size,
-                digest: asset.digest.clone(),
-                published_at: release.published_at,
-                prerelease: release.prerelease,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    if entries.is_empty() {
-        return Err(AppError::message(format!(
-            "No GE-Proton builds were found for the {arch} architecture."
-        )));
-    }
-
-    let catalog = Catalog {
-        schema_version: CATALOG_SCHEMA,
-        fetched_at: Utc::now(),
-        releases: entries,
-    };
-    let path = catalog_path(app)?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| AppError::io("Could not create the tools folder", error))?;
-    }
-    let bytes = serde_json::to_vec_pretty(&catalog)?;
-    tokio::fs::write(&path, bytes)
-        .await
-        .map_err(|error| AppError::io("Could not cache the Proton catalog", error))?;
-
-    entries_to_releases(app, catalog.releases)
-}
-
-fn entries_to_releases(
-    app: &AppHandle,
-    entries: Vec<CatalogEntry>,
-) -> AppResult<Vec<ProtonRelease>> {
-    let installed = installed_tags(app)?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| ProtonRelease {
-            installed: installed.iter().any(|tag| tag == &entry.tag),
-            tag: entry.tag,
-            asset_name: entry.asset_name,
-            download_url: entry.download_url,
-            size: entry.size,
-            digest: entry.digest,
-            published_at: entry.published_at,
-            prerelease: entry.prerelease,
-        })
-        .collect())
+fn managed_umu_path(app: &AppHandle) -> AppResult<PathBuf> {
+    Ok(umu_versions_dir(app)?
+        .join(UMU_TAG)
+        .join("umu")
+        .join("umu-run"))
 }
 
 pub fn find_umu_run(
@@ -290,32 +134,13 @@ pub fn find_umu_run(
         return Ok(find_on_path("umu-run").map(|path| (path, "system".into(), "system".into())));
     }
 
-    if let Some((path, tag)) = find_managed_umu(app)? {
-        return Ok(Some((path, tag, "managed".into())));
+    let managed = managed_umu_path(app)?;
+    if managed.is_file() {
+        return Ok(Some((managed, UMU_TAG.into(), "managed".into())));
     }
 
     if let Some(path) = find_on_path("umu-run") {
         return Ok(Some((path, "system".into(), "system".into())));
-    }
-    Ok(None)
-}
-
-fn find_managed_umu(app: &AppHandle) -> AppResult<Option<(PathBuf, String)>> {
-    let versions = umu_versions_dir(app)?;
-    let Ok(entries) = std::fs::read_dir(&versions) else {
-        return Ok(None);
-    };
-    let mut tags = entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect::<Vec<_>>();
-    sort_tags_newest_first(&mut tags);
-    for tag in tags {
-        let candidate = versions.join(&tag).join("umu").join("umu-run");
-        if candidate.is_file() {
-            return Ok(Some((candidate, tag)));
-        }
     }
     Ok(None)
 }
@@ -346,26 +171,8 @@ pub fn resolve_proton_path(
             Ok(Some((path, "custom".into())))
         }
         ProtonSource::Managed => {
-            let installed = installed_tags(app)?;
-            let selected = preferences.proton_version.trim();
-            if !selected.is_empty() {
-                if !installed.iter().any(|tag| tag == selected) {
-                    return Err(AppError::message(
-                        "The selected GE-Proton build is not installed yet. Use Download to install it.",
-                    ));
-                }
-                return Ok(Some((
-                    managed_proton_path(app, selected)?,
-                    selected.to_owned(),
-                )));
-            }
-            if installed.is_empty() {
-                return Ok(None);
-            }
-            Ok(Some((
-                managed_proton_path(app, &installed[0])?,
-                installed[0].clone(),
-            )))
+            let path = managed_proton_path(app)?;
+            Ok(looks_like_proton(&path).then(|| (path, PROTON_TAG.to_owned())))
         }
     }
 }
@@ -373,7 +180,7 @@ pub fn resolve_proton_path(
 pub fn status(app: &AppHandle, preferences: &Preferences) -> AppResult<ProtonStatus> {
     let prefix = prefix_path(app, preferences)?;
     let prefix_initialized = prefix.join("drive_c").is_dir();
-    let installed = installed_tags(app)?;
+    let managed_installed = looks_like_proton(&managed_proton_path(app)?);
 
     let (umu_available, umu_version, umu_source) = match find_umu_run(app, preferences) {
         Ok(Some((_, version, source))) => (true, Some(version), Some(source)),
@@ -385,7 +192,7 @@ pub fn status(app: &AppHandle, preferences: &Preferences) -> AppResult<ProtonSta
         Ok(None) => (
             None,
             None,
-            Some("No Proton build is installed yet. Download one to continue.".into()),
+            Some("GE-Proton is not installed yet. Download it to continue.".into()),
         ),
         Err(error) => (None, None, Some(error.to_string())),
     };
@@ -410,7 +217,8 @@ pub fn status(app: &AppHandle, preferences: &Preferences) -> AppResult<ProtonSta
         umu_source,
         selected_tag,
         proton_path,
-        installed_tags: installed,
+        managed_tag: PROTON_TAG.into(),
+        managed_installed,
         prefix_path: prefix.to_string_lossy().into_owned(),
         prefix_initialized,
         ready,
@@ -569,15 +377,15 @@ fn cancel_check(cancel: &CancellationToken) -> AppResult<()> {
 pub async fn install_proton(
     app: &AppHandle,
     github: &GitHubClient,
-    release: &ProtonRelease,
     on_event: &Channel<OperationEvent>,
     cancel: &CancellationToken,
 ) -> AppResult<()> {
+    let release = proton_release()?;
     let versions = proton_versions_dir(app)?;
     tokio::fs::create_dir_all(&versions)
         .await
         .map_err(|error| AppError::io("Could not create the Proton folder", error))?;
-    let version_directory = versions.join(sanitize_name(&release.tag));
+    let version_directory = versions.join(PROTON_TAG);
     if looks_like_proton(&version_directory) {
         return Ok(());
     }
@@ -588,15 +396,8 @@ pub async fn install_proton(
         .tempdir_in(&versions)
         .map_err(|error| AppError::io("Could not create a temporary Proton folder", error))?;
     let archive = temporary.path().join(&release.asset_name);
-    let release_info = ReleaseInfo {
-        tag: release.tag.clone(),
-        asset_name: release.asset_name.clone(),
-        download_url: release.download_url.clone(),
-        size: release.size,
-        digest: release.digest.clone(),
-    };
     github
-        .download_large(&release_info, &archive, on_event, "proton", 15, 70)
+        .download_large(&release, &archive, on_event, "proton", 15, 70)
         .await?;
 
     cancel_check(cancel)?;
@@ -624,8 +425,9 @@ pub async fn install_proton(
     Ok(())
 }
 
-pub fn remove_proton(app: &AppHandle, tag: &str) -> AppResult<()> {
-    let directory = managed_proton_path(app, tag)?;
+/** Removes every managed GE-Proton build, including ones an earlier launcher installed. */
+pub fn remove_proton(app: &AppHandle) -> AppResult<()> {
+    let directory = proton_versions_dir(app)?;
     if !directory.exists() {
         return Ok(());
     }
@@ -638,34 +440,15 @@ pub async fn install_umu(
     github: &GitHubClient,
     on_event: &Channel<OperationEvent>,
     cancel: &CancellationToken,
-) -> AppResult<String> {
-    if let Some((_, tag)) = find_managed_umu(app)? {
-        return Ok(tag);
-    }
-
-    let releases = github
-        .releases(UMU_REPOSITORY_OWNER, UMU_REPOSITORY, 10)
-        .await?;
-    let (tag, asset) = releases
-        .iter()
-        .filter(|release| !release.prerelease)
-        .find_map(|release| {
-            release
-                .assets
-                .iter()
-                .find(|asset| asset.name.ends_with("-zipapp.tar"))
-                .map(|asset| (release.tag.clone(), asset.clone()))
-        })
-        .ok_or_else(|| AppError::message("No umu-launcher zipapp release was found."))?;
-
+) -> AppResult<()> {
+    let release = umu_release();
     let versions = umu_versions_dir(app)?;
     tokio::fs::create_dir_all(&versions)
         .await
         .map_err(|error| AppError::io("Could not create the umu folder", error))?;
-    let version_directory = versions.join(sanitize_name(&tag));
-    let umu_run = version_directory.join("umu").join("umu-run");
-    if umu_run.is_file() {
-        return Ok(tag);
+    let version_directory = versions.join(UMU_TAG);
+    if managed_umu_path(app)?.is_file() {
+        return Ok(());
     }
 
     cancel_check(cancel)?;
@@ -673,16 +456,9 @@ pub async fn install_umu(
         .prefix(".umu-")
         .tempdir_in(&versions)
         .map_err(|error| AppError::io("Could not create a temporary umu folder", error))?;
-    let archive = temporary.path().join(&asset.name);
-    let release_info = ReleaseInfo {
-        tag: tag.clone(),
-        asset_name: asset.name.clone(),
-        download_url: asset.download_url.clone(),
-        size: asset.size,
-        digest: asset.digest.clone(),
-    };
+    let archive = temporary.path().join(&release.asset_name);
     github
-        .download(&release_info, &archive, on_event, "proton", 5, 15)
+        .download(&release, &archive, on_event, "proton", 5, 15)
         .await?;
 
     cancel_check(cancel)?;
@@ -708,7 +484,7 @@ pub async fn install_umu(
         ));
     }
     installer::make_executable(&installed)?;
-    Ok(tag)
+    Ok(())
 }
 
 fn single_root(directory: &Path) -> AppResult<PathBuf> {
@@ -741,131 +517,13 @@ fn extract_tar_file(archive_path: &Path, destination: &Path) -> AppResult<()> {
     extract_tar(file, destination)
 }
 
+/** Unpacks inside `destination` only; setuid, setgid and sticky bits are dropped. */
 fn extract_tar<R: Read>(reader: R, destination: &Path) -> AppResult<()> {
     let mut archive = tar::Archive::new(reader);
-    let entries = archive
-        .entries()
-        .map_err(|error| AppError::message(format!("The archive could not be read: {error}")))?;
-
-    for entry in entries {
-        let mut entry =
-            entry.map_err(|error| AppError::message(format!("The archive is damaged: {error}")))?;
-        let path = entry
-            .path()
-            .map_err(|error| AppError::message(format!("The archive is damaged: {error}")))?;
-        let relative = safe_relative_path(&path)
-            .ok_or_else(|| AppError::message("The archive contains an unsafe path."))?;
-        let output = destination.join(&relative);
-        let kind = entry.header().entry_type();
-
-        if kind.is_dir() {
-            std::fs::create_dir_all(&output)
-                .map_err(|error| AppError::io("Could not create an extracted folder", error))?;
-            continue;
-        }
-        if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| AppError::io("Could not create an extracted folder", error))?;
-        }
-
-        if kind.is_symlink() {
-            let target = entry
-                .link_name()
-                .map_err(|error| AppError::message(format!("The archive is damaged: {error}")))?
-                .ok_or_else(|| AppError::message("The archive has a link without a target."))?;
-            if !symlink_target_is_safe(&relative, &target) {
-                return Err(AppError::message(
-                    "The archive contains a link that escapes its folder.",
-                ));
-            }
-            create_symlink(&target, &output)?;
-            continue;
-        }
-
-        if kind.is_hard_link() {
-            let target = entry
-                .link_name()
-                .map_err(|error| AppError::message(format!("The archive is damaged: {error}")))?
-                .ok_or_else(|| AppError::message("The archive has a link without a target."))?;
-            let Some(source) = safe_relative_path(&target).map(|path| destination.join(path))
-            else {
-                return Err(AppError::message(
-                    "The archive contains a link that escapes its folder.",
-                ));
-            };
-            if !source.is_file() {
-                continue;
-            }
-            std::fs::copy(&source, &output)
-                .map_err(|error| AppError::io("Could not extract a linked file", error))?;
-            continue;
-        }
-
-        if kind.is_file() {
-            let mut file = std::fs::File::create(&output)
-                .map_err(|error| AppError::io("Could not create an extracted file", error))?;
-            std::io::copy(&mut entry, &mut file)
-                .map_err(|error| AppError::io("Could not extract a file", error))?;
-
-            #[cfg(unix)]
-            if let Ok(mode) = entry.header().mode() {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = file.metadata() {
-                    let mut perms = metadata.permissions();
-                    perms.set_mode(mode);
-                    let _ = file.set_permissions(perms);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn safe_relative_path(path: &Path) -> Option<PathBuf> {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => result.push(part),
-            Component::CurDir => {}
-            _ => return None,
-        }
-    }
-    (!result.as_os_str().is_empty()).then_some(result)
-}
-
-fn symlink_target_is_safe(relative: &Path, target: &Path) -> bool {
-    if target.is_absolute() {
-        return false;
-    }
-    let mut depth = relative
-        .parent()
-        .map(|parent| parent.components().count() as i64)
-        .unwrap_or(0);
-    for component in target.components() {
-        match component {
-            Component::Normal(_) => depth += 1,
-            Component::CurDir => {}
-            Component::ParentDir => {
-                depth -= 1;
-                if depth < 0 {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-    }
-    true
-}
-
-#[cfg(unix)]
-fn create_symlink(target: &Path, output: &Path) -> AppResult<()> {
-    std::os::unix::fs::symlink(target, output)
-        .map_err(|error| AppError::io("Could not extract a link", error))
-}
-
-#[cfg(not(unix))]
-fn create_symlink(_target: &Path, _output: &Path) -> AppResult<()> {
-    Ok(())
+    archive.set_preserve_permissions(false);
+    archive
+        .unpack(destination)
+        .map_err(|error| AppError::message(format!("The archive could not be extracted: {error}")))
 }
 
 #[cfg(test)]
@@ -873,61 +531,27 @@ mod tests {
     #[cfg(unix)]
     use super::{Mutex, ProcessTracker};
     use super::{
-        asset_arch, extract_tar_gz, natural_cmp, sanitize_name, select_asset, single_root,
+        PROTON_ASSETS, PROTON_TAG, extract_tar_gz, proton_release, single_root, umu_release,
     };
-    use crate::models::{ReleaseAsset, ReleaseSummary};
-
-    fn release(assets: Vec<(&str, u64)>) -> ReleaseSummary {
-        ReleaseSummary {
-            tag: "GE-Proton11-7".into(),
-            name: "GE-Proton11-7".into(),
-            prerelease: false,
-            published_at: None,
-            assets: assets
-                .into_iter()
-                .map(|(name, size)| ReleaseAsset {
-                    name: name.into(),
-                    download_url: format!("https://example.invalid/{name}"),
-                    size,
-                    digest: Some("sha256:aabb".into()),
-                })
-                .collect(),
-        }
-    }
 
     #[test]
-    fn select_asset_prefers_arch_suffixed_tarball_and_falls_back_to_legacy_name() {
-        let summary = release(vec![
-            ("GE-Proton11-7-aarch64.sha512sum", 159),
-            ("GE-Proton11-7-aarch64.tar.gz", 645_786_140),
-            ("GE-Proton11-7-x86_64.sha512sum", 158),
-            ("GE-Proton11-7-x86_64.tar.gz", 563_784_602),
-        ]);
-        let x86 = select_asset(&summary, "x86_64").expect("x86_64 asset");
-        assert_eq!(x86.name, "GE-Proton11-7-x86_64.tar.gz");
-        let arm = select_asset(&summary, "aarch64").expect("aarch64 asset");
-        assert_eq!(arm.name, "GE-Proton11-7-aarch64.tar.gz");
-
-        let checksum_only = release(vec![("GE-Proton11-7-x86_64.sha512sum", 158)]);
-        assert!(select_asset(&checksum_only, "x86_64").is_none());
-
-        let legacy = release(vec![("GE-Proton11-7.tar.gz", 560_000_000)]);
-        assert_eq!(
-            select_asset(&legacy, "x86_64").expect("legacy asset").name,
-            "GE-Proton11-7.tar.gz"
+    fn pinned_releases_always_carry_a_sha256() {
+        for (_, asset_name, size, sha256) in PROTON_ASSETS {
+            assert!(asset_name.starts_with(PROTON_TAG));
+            assert!(size > 0);
+            assert_eq!(sha256.len(), 64);
+            assert!(sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
+        let umu = umu_release();
+        assert!(
+            umu.digest
+                .as_deref()
+                .is_some_and(|digest| digest.len() == 71)
         );
-        assert!(select_asset(&legacy, "aarch64").is_none());
-
-        let both = release(vec![
-            ("GE-Proton11-7.tar.gz", 1),
-            ("GE-Proton11-7-x86_64.tar.gz", 563_784_602),
-        ]);
-        assert_eq!(
-            select_asset(&both, "x86_64").expect("arch asset").name,
-            "GE-Proton11-7-x86_64.tar.gz"
-        );
-
-        assert!(asset_arch().is_ok());
+        if let Ok(proton) = proton_release() {
+            assert!(proton.download_url.ends_with(&proton.asset_name));
+            assert!(proton.digest.is_some());
+        }
     }
 
     #[test]
@@ -964,36 +588,36 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_name_rejects_path_traversal_characters() {
-        assert_eq!(sanitize_name("GE-Proton11-7"), "GE-Proton11-7");
-        assert_eq!(sanitize_name("../../etc/passwd"), ".._.._etc_passwd");
-        assert_eq!(sanitize_name("a/b\\c"), "a_b_c");
-    }
+    fn extract_tar_skips_escaping_paths_and_drops_setuid() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            for name in [&b"../escaped"[..], &b"root/tool"[..]] {
+                let mut header = tar::Header::new_old();
+                header.as_old_mut().name[..name.len()].copy_from_slice(name);
+                header.set_size(1);
+                header.set_mode(0o4755);
+                header.set_cksum();
+                builder.append(&header, &b"x"[..]).expect("append entry");
+            }
+            builder.finish().expect("finish tar");
+        }
 
-    #[test]
-    fn natural_cmp_sorts_versions_numerically_not_lexicographically() {
-        use std::cmp::Ordering;
-
-        assert_eq!(
-            natural_cmp("GE-Proton9-27", "GE-Proton10-1"),
-            Ordering::Less
-        );
-        assert_eq!(natural_cmp("1.4.4", "1.10.0"), Ordering::Less);
-        assert_eq!(
-            natural_cmp("GE-Proton11-7", "GE-Proton11-7"),
-            Ordering::Equal
-        );
-
-        let mut tags = vec![
-            "GE-Proton9-27".to_owned(),
-            "GE-Proton10-1".to_owned(),
-            "GE-Proton11-7".to_owned(),
-        ];
-        super::sort_tags_newest_first(&mut tags);
-        assert_eq!(
-            tags,
-            vec!["GE-Proton11-7", "GE-Proton10-1", "GE-Proton9-27"]
-        );
+        let destination = temporary.path().join("out");
+        super::extract_tar(&bytes[..], &destination).expect("extract");
+        assert!(!temporary.path().join("escaped").exists());
+        let tool = destination.join("root").join("tool");
+        assert!(tool.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&tool)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o7000, 0);
+        }
     }
 
     #[cfg(unix)]

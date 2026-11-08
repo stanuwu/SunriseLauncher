@@ -120,8 +120,6 @@ pub struct Preferences {
     pub crossover_backend: String,
     // Proton settings; only meaningful on Linux and ignored elsewhere.
     #[serde(default)]
-    pub proton_version: String,
-    #[serde(default)]
     pub proton_source: ProtonSource,
     #[serde(default)]
     pub proton_custom_path: String,
@@ -148,7 +146,6 @@ impl Default for Preferences {
             auth_method: AuthMethod::default(),
             crossover_bottle: default_crossover_bottle(),
             crossover_backend: default_crossover_backend(),
-            proton_version: String::new(),
             proton_source: ProtonSource::default(),
             proton_custom_path: String::new(),
             umu_source: UmuSource::default(),
@@ -211,25 +208,6 @@ pub struct ReleaseInfo {
     pub download_url: String,
     pub size: u64,
     pub digest: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReleaseAsset {
-    pub name: String,
-    pub download_url: String,
-    pub size: u64,
-    pub digest: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReleaseSummary {
-    pub tag: String,
-    pub name: String,
-    pub prerelease: bool,
-    pub published_at: Option<DateTime<Utc>>,
-    pub assets: Vec<ReleaseAsset>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -344,19 +322,6 @@ pub struct AppSnapshot {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProtonRelease {
-    pub tag: String,
-    pub asset_name: String,
-    pub download_url: String,
-    pub size: u64,
-    pub digest: Option<String>,
-    pub published_at: Option<DateTime<Utc>>,
-    pub prerelease: bool,
-    pub installed: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ProtonStatus {
     pub supported: bool,
     pub umu_available: bool,
@@ -365,7 +330,9 @@ pub struct ProtonStatus {
     pub umu_source: Option<String>,
     pub selected_tag: Option<String>,
     pub proton_path: Option<String>,
-    pub installed_tags: Vec<String>,
+    /// The GE-Proton build the launcher downloads.
+    pub managed_tag: String,
+    pub managed_installed: bool,
     pub prefix_path: String,
     pub prefix_initialized: bool,
     /// Whether the selected Proton is usable for a launch right now.
@@ -445,7 +412,7 @@ pub fn current_platform() -> PlatformSupport {
             arch,
             level: "experimental".into(),
             can_launch: false,
-            summary: "Native installation is supported; launching through Proton is a follow-up integration.".into(),
+            summary: "Native installation is supported; the game launches through Proton.".into(),
         },
         "macos" => PlatformSupport {
             os,
@@ -453,7 +420,8 @@ pub fn current_platform() -> PlatformSupport {
             level: "experimental".into(),
             // Raised once CrossOver and the game's bottle are found.
             can_launch: false,
-            summary: "Native installation is supported; the game launches through CrossOver.".into(),
+            summary: "Native installation is supported; the game launches through CrossOver."
+                .into(),
         },
         _ => PlatformSupport {
             os,
@@ -567,7 +535,6 @@ mod tests {
         assert_eq!(preferences.proton_source, ProtonSource::Managed);
         assert_eq!(preferences.umu_source, UmuSource::Managed);
         assert_eq!(preferences.game_id, "sunrise");
-        assert!(preferences.proton_version.is_empty());
         assert!(preferences.proton_custom_path.is_empty());
         assert!(preferences.proton_prefix.is_empty());
         assert!(preferences.launch_options.is_empty());
@@ -577,7 +544,6 @@ mod tests {
     #[test]
     fn proton_preferences_round_trip() {
         let preferences = Preferences {
-            proton_version: "GE-Proton11-7".into(),
             proton_source: ProtonSource::Custom,
             proton_custom_path: "/opt/proton".into(),
             umu_source: UmuSource::System,
@@ -589,7 +555,6 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&preferences).expect("serialize");
         let parsed: Preferences = serde_json::from_slice(&bytes).expect("deserialize");
-        assert_eq!(parsed.proton_version, "GE-Proton11-7");
         assert_eq!(parsed.proton_source, ProtonSource::Custom);
         assert_eq!(parsed.umu_source, UmuSource::System);
         assert_eq!(parsed.launch_options, "mangohud %command% -novid");

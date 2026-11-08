@@ -72,7 +72,6 @@ pub fn run() {
             commands::inspect_installation,
             commands::save_preferences,
             commands::get_proton_status,
-            commands::list_proton_releases,
             commands::install_proton,
             commands::remove_proton,
             commands::initialize_proton_prefix,

@@ -11,7 +11,7 @@ This repository is a rewrite of [SunriseInstaller](https://github.com/stanuwu/Su
 | Platform | Install / repair / update | Launch |
 | --- | --- | --- |
 | Windows x64 / ARM64 | Supported | Supported |
-| Linux x64 / ARM64 | Experimental | Proton integration pending |
+| Linux x64 / ARM64 | Experimental | Through GE-Proton and umu-launcher |
 | macOS x64 / ARM64 | Experimental | Through CrossOver 26 or newer (D3DMetal or DXMT) |
 
 "Cross-platform" applies to the installer. Sunrise remains a Windows DLL for a Windows build of Destiny 2.
@@ -19,6 +19,10 @@ This repository is a rewrite of [SunriseInstaller](https://github.com/stanuwu/Su
 On macOS the launcher runs the game inside a CrossOver bottle it creates for the purpose, with
 the graphics backend chosen in Settings. Deny CrossOver the microphone in System Settings before
 the first launch, and play in fullscreen; see the CrossOver section of Settings for the reasons.
+
+On Linux the launcher runs the game through Proton with umu-launcher. It downloads pinned
+builds of both, GE-Proton11-11 and umu-launcher 1.4.4, and checks each against a SHA-256 in its
+code. Settings can use a Proton folder you already have, or `umu-run` from your `PATH` instead.
 
 ## Current installer flow
 
@@ -81,8 +85,6 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ```powershell
 npm run tauri build
 ```
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for trust boundaries, installer behavior, and planned Proton support.
 
 ## Distribution notes
 

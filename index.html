@@ -179,14 +179,9 @@
           </section>
 
           <section class="settings-section proton-section" id="proton-section" hidden>
-            <div class="section-heading"><span>Proton</span><button class="refresh-button" id="proton-refresh" type="button">Refresh list</button></div>
+            <div class="section-heading"><span>Proton</span></div>
 
             <div class="proton-status" id="proton-status" role="status">Checking the Proton environment…</div>
-
-            <label class="setting-field" for="proton-version">
-              <span><strong>Proton version</strong><small>GE-Proton builds, fetched from GitHub</small></span>
-              <select id="proton-version"></select>
-            </label>
 
             <label class="setting-field" for="proton-umu-source">
               <span><strong>umu-launcher</strong><small>Managed download, or the one already installed on your system</small></span>
@@ -312,14 +307,8 @@
               </label>
             </div>
             <p class="language-warning setup-language-warning" id="setup-language-warning" hidden>Non-English installations may be harder to troubleshoot. English is recommended when requesting support.</p>
-            <label class="setting-field setup-field">
-              <span>
-                <strong>Sign-in method</strong>
-                <small>How you will authenticate your Steam account</small>
-              </span>
-            </label>
             <fieldset class="auth-choice">
-              
+              <legend><strong>Sign-in method</strong><small>How you will authenticate your Steam account</small></legend>
               <label><input type="radio" name="setup-auth-method" value="qr" checked /><span><strong>QR code</strong><small>Scan with Steam Mobile</small></span></label>
               <label><input type="radio" name="setup-auth-method" value="twoFactor" /><span><strong>Steam Guard code</strong><small>Enter password and 2FA</small></span></label>
             </fieldset>
@@ -331,12 +320,8 @@
 
           <section class="setup-page" data-setup-page="2" hidden id="setup-proton-page">
             <p class="setup-kicker" id="setup-kicker-proton">Step 3 of 4</p>
-            <h3>Choose a Proton version</h3>
-            <p class="setup-description">Sunrise runs the Windows build of Destiny 2 through Proton. Pick a GE-Proton build to download, or point at one you already have.</p>
-            <label class="setting-field setup-field" for="setup-proton-version">
-              <span><strong>Proton version</strong><small id="setup-proton-hint">Loading available builds…</small></span>
-              <select id="setup-proton-version"></select>
-            </label>
+            <h3>Set up Proton</h3>
+            <p class="setup-description">Sunrise runs the Windows build of Destiny 2 through Proton. <span id="setup-proton-hint">The launcher downloads GE-Proton from GitHub.</span></p>
             <label class="setting-field setup-field" for="setup-proton-custom">
               <span><strong>Custom Proton folder</strong><small>Optional; leave empty to use the managed build</small></span>
               <span class="input-group">

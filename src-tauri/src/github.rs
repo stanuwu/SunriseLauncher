@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, USER_AGENT};
 use serde::Deserialize;
@@ -10,7 +9,7 @@ use tauri::ipc::Channel;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{OperationEvent, ReleaseAsset, ReleaseInfo, ReleaseSummary};
+use crate::models::{OperationEvent, ReleaseInfo};
 
 /// Default ceiling for launcher-managed downloads (release DLLs, tools).
 pub const DEFAULT_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
@@ -18,8 +17,6 @@ pub const DEFAULT_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 pub const LARGE_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 // Mission scripts are text; a larger archive is not the scripts repository.
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
-// GitHub returns at most 100 releases per page.
-const MAX_RELEASE_PAGE: u32 = 100;
 
 #[derive(Clone)]
 pub struct GitHubClient {
@@ -29,36 +26,7 @@ pub struct GitHubClient {
 #[derive(Debug, Deserialize)]
 struct ApiRelease {
     tag_name: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    prerelease: bool,
-    #[serde(default)]
-    draft: bool,
-    #[serde(default)]
-    published_at: Option<DateTime<Utc>>,
     assets: Vec<ApiAsset>,
-}
-
-impl ApiRelease {
-    fn into_summary(self) -> ReleaseSummary {
-        ReleaseSummary {
-            name: self.name.unwrap_or_else(|| self.tag_name.clone()),
-            tag: self.tag_name,
-            prerelease: self.prerelease,
-            published_at: self.published_at,
-            assets: self
-                .assets
-                .into_iter()
-                .map(|asset| ReleaseAsset {
-                    name: asset.name,
-                    download_url: asset.browser_download_url,
-                    size: asset.size,
-                    digest: asset.digest,
-                })
-                .collect(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,45 +104,6 @@ impl GitHubClient {
             size: asset.size,
             digest: asset.digest,
         })
-    }
-
-    pub async fn releases(
-        &self,
-        owner: &str,
-        repository: &str,
-        limit: u32,
-    ) -> AppResult<Vec<ReleaseSummary>> {
-        let per_page = limit.clamp(1, MAX_RELEASE_PAGE);
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repository}/releases?per_page={per_page}"
-        );
-        let response = self
-            .client
-            .get(url)
-            .header(USER_AGENT, "Project-Sunrise-Launcher/0.1")
-            .header(ACCEPT, "application/vnd.github+json")
-            .timeout(Duration::from_secs(20))
-            .send()
-            .await?;
-
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(AppError::message(format!(
-                "No published releases were found for {owner}/{repository}."
-            )));
-        }
-        if !response.status().is_success() {
-            return Err(AppError::message(format!(
-                "GitHub returned HTTP {} while checking {owner}/{repository}.",
-                response.status().as_u16()
-            )));
-        }
-
-        let releases: Vec<ApiRelease> = response.json().await?;
-        Ok(releases
-            .into_iter()
-            .filter(|release| !release.draft)
-            .map(ApiRelease::into_summary)
-            .collect())
     }
 
     pub async fn latest_commit(
@@ -269,7 +198,6 @@ impl GitHubClient {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn download_large(
         &self,
         release: &ReleaseInfo,
@@ -383,9 +311,12 @@ impl GitHubClient {
     }
 }
 
+/// Refuses a download that has no published SHA-256 digest or does not match it.
 fn verify_digest(digest: Option<&str>, actual: &str) -> AppResult<()> {
     let Some(digest) = digest else {
-        return Ok(());
+        return Err(AppError::message(
+            "The release carries no SHA-256 digest, so the download cannot be verified.",
+        ));
     };
     let expected = digest
         .strip_prefix("sha256:")
@@ -401,7 +332,7 @@ fn verify_digest(digest: Option<&str>, actual: &str) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiRelease, verify_digest};
+    use super::verify_digest;
 
     #[test]
     fn accepts_matching_github_digest() {
@@ -414,41 +345,8 @@ mod tests {
     }
 
     #[test]
-    fn release_summary_parses_name_fallback_and_missing_fields() {
-        let release: ApiRelease = serde_json::from_str(
-            r#"{
-                "tag_name": "GE-Proton11-7",
-                "name": null,
-                "prerelease": false,
-                "draft": false,
-                "published_at": "2026-07-24T18:26:00Z",
-                "assets": [
-                    {
-                        "name": "GE-Proton11-7-x86_64.tar.gz",
-                        "browser_download_url": "https://example.invalid/ge.tar.gz",
-                        "size": 563784602,
-                        "digest": "sha256:c5448b76"
-                    }
-                ]
-            }"#,
-        )
-        .expect("release should parse");
-
-        let summary = release.into_summary();
-        assert_eq!(summary.tag, "GE-Proton11-7");
-        assert_eq!(summary.name, "GE-Proton11-7");
-        assert!(!summary.prerelease);
-        assert!(summary.published_at.is_some());
-        assert_eq!(summary.assets.len(), 1);
-        assert_eq!(summary.assets[0].size, 563_784_602);
-        assert_eq!(summary.assets[0].digest.as_deref(), Some("sha256:c5448b76"));
-
-        let minimal: ApiRelease = serde_json::from_str(r#"{ "tag_name": "1.4.4", "assets": [] }"#)
-            .expect("minimal release should parse");
-        let minimal_summary = minimal.into_summary();
-        assert_eq!(minimal_summary.name, "1.4.4");
-        assert!(!minimal_summary.prerelease);
-        assert!(minimal_summary.published_at.is_none());
-        assert!(minimal_summary.assets.is_empty());
+    fn rejects_missing_github_digest() {
+        let error = verify_digest(None, "aabb").expect_err("missing digest must fail");
+        assert!(error.to_string().contains("no SHA-256 digest"));
     }
 }

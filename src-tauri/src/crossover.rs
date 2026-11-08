@@ -91,13 +91,14 @@ pub fn sanitize_bottle_name(name: &str) -> AppResult<String> {
             "The bottle name is too long; use at most {MAX_BOTTLE_NAME} characters."
         )));
     }
-    if trimmed.starts_with('.')
+    // CrossOver's tools would read a leading dash as an option.
+    if trimmed.starts_with(['.', '-'])
         || trimmed
             .chars()
             .any(|character| matches!(character, '/' | '\\' | ':' | '\0'))
     {
         return Err(AppError::message(
-            "The bottle name cannot start with a dot or contain slashes or colons.",
+            "The bottle name cannot start with a dot or a dash, or contain slashes or colons.",
         ));
     }
     Ok(trimmed.to_owned())
@@ -213,7 +214,7 @@ pub fn status(preferences: &Preferences) -> CrossOverStatus {
             supported: true,
             bottle_name,
             error: Some(
-                "CrossOver was not found in /Applications. Install CrossOver 26 or newer, then refresh."
+                "CrossOver was not found in /Applications or ~/Applications. Install CrossOver 26 or newer, then refresh."
                     .into(),
             ),
             ..CrossOverStatus::unsupported()
@@ -335,6 +336,8 @@ mod tests {
         assert!(sanitize_bottle_name("a/b").is_err());
         assert!(sanitize_bottle_name("a:b").is_err());
         assert!(sanitize_bottle_name(".hidden").is_err());
+        assert!(sanitize_bottle_name("--delete").is_err());
+        assert!(sanitize_bottle_name("Sunrise-Test").is_ok());
         assert!(sanitize_bottle_name(&"x".repeat(65)).is_err());
     }
 

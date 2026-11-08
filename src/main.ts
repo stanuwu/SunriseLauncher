@@ -14,7 +14,6 @@ type Preferences = {
   authMethod: AuthMethod;
   crossoverBottle: string;
   crossoverBackend: string;
-  protonVersion: string;
   protonSource: ProtonSource;
   protonCustomPath: string;
   umuSource: UmuSource;
@@ -61,16 +60,6 @@ type ReleaseInfo = {
   size: number;
   digest: string | null;
 };
-type ProtonRelease = {
-  tag: string;
-  assetName: string;
-  downloadUrl: string;
-  size: number;
-  digest: string | null;
-  publishedAt: string | null;
-  prerelease: boolean;
-  installed: boolean;
-};
 type ProtonStatus = {
   supported: boolean;
   umuAvailable: boolean;
@@ -78,7 +67,8 @@ type ProtonStatus = {
   umuSource: string | null;
   selectedTag: string | null;
   protonPath: string | null;
-  installedTags: string[];
+  managedTag: string;
+  managedInstalled: boolean;
   prefixPath: string;
   prefixInitialized: boolean;
   ready: boolean;
@@ -166,7 +156,6 @@ const authQrCode = (() => {
 })();
 const protonSection = element<HTMLElement>("#proton-section");
 const protonStatus = element<HTMLElement>("#proton-status");
-const protonVersion = element<HTMLSelectElement>("#proton-version");
 const protonCustomPath = element<HTMLInputElement>("#proton-custom-path");
 const protonUmuSource = element<HTMLSelectElement>("#proton-umu-source");
 const protonToggle = element<HTMLButtonElement>("#proton-toggle");
@@ -181,7 +170,6 @@ const protonProgressPercent = element<HTMLElement>("#proton-progress-percent");
 const protonProgressFill = element<HTMLElement>("#proton-progress-fill");
 const protonProgressCancel = element<HTMLButtonElement>("#proton-progress-cancel");
 const setupProtonPage = element<HTMLElement>("#setup-proton-page");
-const setupProtonVersion = element<HTMLSelectElement>("#setup-proton-version");
 const setupProtonCustom = element<HTMLInputElement>("#setup-proton-custom");
 
 let snapshot: AppSnapshot | null = null;
@@ -198,7 +186,6 @@ let setupDraft: Preferences = {
   authMethod: "qr",
   crossoverBottle: "Sunrise",
   crossoverBackend: "d3dmetal",
-  protonVersion: "",
   protonSource: "managed",
   protonCustomPath: "",
   umuSource: "managed",
@@ -224,8 +211,6 @@ let gameStatusTimer: number | undefined;
 let authHideTimer: number | undefined;
 let mockOperationCancelled = false;
 let mockGameRunning = false;
-let protonReleases: ProtonRelease[] = [];
-let protonCatalogError: string | null = null;
 type ProtonOperation = "install" | "remove" | "prepare";
 let activeProtonOperation: ProtonOperation | null = null;
 let protonProgressHideTimer: number | undefined;
@@ -265,7 +250,6 @@ const mockSnapshot: AppSnapshot = {
     authMethod: "qr",
     crossoverBottle: "Sunrise",
     crossoverBackend: "d3dmetal",
-    protonVersion: "",
     protonSource: "managed",
     protonCustomPath: "",
     umuSource: "managed",
@@ -303,20 +287,6 @@ async function invokeCommand<T>(command: string, args: Record<string, unknown> =
   if (inTauri) return invoke<T>(command, args);
   if (command === "get_app_snapshot") return structuredClone(mockSnapshot) as T;
   if (command === "get_proton_status") return null as T;
-  if (command === "list_proton_releases") {
-    return [
-      {
-        tag: "GE-Proton11-7",
-        assetName: "GE-Proton11-7-x86_64.tar.gz",
-        downloadUrl: "",
-        size: 563_784_602,
-        digest: "sha256:preview",
-        publishedAt: null,
-        prerelease: false,
-        installed: false,
-      },
-    ] as T;
-  }
   if (command === "install_proton" || command === "remove_proton" || command === "initialize_proton_prefix") {
     return null as T;
   }
@@ -515,32 +485,6 @@ function protonStatusCopy(status: ProtonStatus | null): string {
   return `${umu} · ${proton} · ${prefix}`;
 }
 
-function renderProtonOptions(select: HTMLSelectElement, selected: string) {
-  const installed = snapshot?.proton?.installedTags ?? [];
-  const options: HTMLOptionElement[] = [];
-
-  for (const tag of installed) {
-    const option = document.createElement("option");
-    option.value = tag;
-    option.textContent = `${tag} (installed)`;
-    options.push(option);
-  }
-  for (const release of protonReleases) {
-    if (installed.includes(release.tag)) continue;
-    const option = document.createElement("option");
-    option.value = release.tag;
-    option.textContent = release.prerelease ? `${release.tag} (pre-release)` : release.tag;
-    options.push(option);
-  }
-
-  select.replaceChildren(...options);
-  if (selected && options.some((option) => option.value === selected)) {
-    select.value = selected;
-  } else if (options.length) {
-    select.value = options[0].value;
-  }
-}
-
 function renderProton() {
   const status = snapshot?.proton ?? null;
   protonSection.hidden = !isLinux();
@@ -550,8 +494,6 @@ function renderProton() {
   protonStatus.classList.toggle("ready", Boolean(status?.ready));
   protonStatus.classList.toggle("problem", Boolean(status?.error));
 
-  const desired = snapshot?.preferences.protonVersion?.trim() || status?.selectedTag || "";
-  renderProtonOptions(protonVersion, desired);
   protonCustomPath.value = snapshot?.preferences.protonCustomPath ?? "";
   protonUmuSource.value = snapshot?.preferences.umuSource ?? "managed";
   launchOptions.value = snapshot?.preferences.launchOptions ?? "";
@@ -560,32 +502,17 @@ function renderProton() {
   protonDebug.checked = Boolean(snapshot?.preferences.protonDebugLogging);
 
   const busy = operationRunning;
-  const selected = protonVersion.value;
-  const selectedInstalled = (status?.installedTags ?? []).includes(selected);
-  protonToggle.textContent = selectedInstalled ? "Remove" : "Download";
-  protonToggle.classList.toggle("danger", selectedInstalled);
-  protonToggle.disabled = busy || !selected;
+  const installed = Boolean(status?.managedInstalled);
+  protonToggle.textContent = installed ? "Remove GE-Proton" : `Download ${status?.managedTag ?? "GE-Proton"}`;
+  protonToggle.classList.toggle("danger", installed);
+  protonToggle.disabled = busy || !status;
   element<HTMLButtonElement>("#proton-prepare").disabled = busy || !status?.protonPath || !status?.umuAvailable;
-  element<HTMLButtonElement>("#proton-refresh").disabled = busy;
-}
-
-async function loadProtonReleases(refresh = false) {
-  if (!isLinux()) return;
-  protonCatalogError = null;
-  try {
-    protonReleases = await invokeCommand<ProtonRelease[]>("list_proton_releases", { refresh });
-  } catch (error) {
-    protonReleases = [];
-    protonCatalogError = String(error);
-  }
-  renderProton();
 }
 
 async function saveProtonPreferences() {
   if (!snapshot) return;
   const preferences: Preferences = {
     ...snapshot.preferences,
-    protonVersion: protonVersion.value,
     protonSource: protonCustomPath.value.trim() ? "custom" : "managed",
     protonCustomPath: protonCustomPath.value.trim(),
     umuSource: protonUmuSource.value as UmuSource,
@@ -642,7 +569,6 @@ async function pollProtonOperation() {
   activeProtonOperation = null;
   hideProtonProgress();
   await loadSnapshot(true);
-  await loadProtonReleases();
 }
 
 // Re-attaches to a proton operation that the backend is still running after the
@@ -677,38 +603,29 @@ function handleProtonEvent(message: OperationEvent) {
   }
 }
 
-async function runProtonCommand(
-  command: string,
-  args: Record<string, unknown> = {},
-  kind: ProtonOperation = "install",
-) {
+async function runProtonCommand(command: string, kind: ProtonOperation) {
   if (operationRunning) return;
   operationRunning = true;
   activeProtonOperation = kind;
   operationStrip.hidden = true;
   stopProtonReconcile();
   renderProton();
-  setProtonProgress(
-    kind,
-    kind === "remove" ? `Removing ${args.tag ?? ""}…` : "Starting…",
-    0,
-    kind !== "remove",
-  );
+  setProtonProgress(kind, kind === "remove" ? "Removing GE-Proton…" : "Starting…", 0, kind !== "remove");
   const onEvent: EventSink = inTauri ? new Channel<OperationEvent>() : {};
   if (kind !== "remove") onEvent.onmessage = handleProtonEvent;
   let success = false;
   try {
     if (kind === "remove") {
-      setProtonProgress(kind, `Removing ${args.tag ?? ""}…`, 95, false);
-      const status = await invokeCommand<ProtonStatus | null>(command, args);
+      setProtonProgress(kind, "Removing GE-Proton…", 95, false);
+      const status = await invokeCommand<ProtonStatus | null>(command);
       if (status && snapshot) snapshot = { ...snapshot, proton: status };
     } else {
-      const status = await invokeCommand<ProtonStatus | null>(command, { ...args, onEvent });
+      const status = await invokeCommand<ProtonStatus | null>(command, { onEvent });
       if (status && snapshot) snapshot = { ...snapshot, proton: status };
     }
     success = true;
     const toast = kind === "install"
-      ? `GE-Proton ${args.tag ?? ""} installed.`
+      ? `${snapshot?.proton?.managedTag ?? "GE-Proton"} installed.`
       : kind === "remove"
         ? "GE-Proton removed."
         : "Proton environment is ready.";
@@ -725,7 +642,6 @@ async function runProtonCommand(
       hideProtonProgress();
     }
     await loadSnapshot(true);
-    await loadProtonReleases();
   }
 }
 
@@ -840,7 +756,6 @@ function openSettings() {
   setOverlay(setupView, false);
   setOverlay(authView, false);
   setOverlay(settingsView, true);
-  void loadProtonReleases();
   void syncProtonOperation();
   window.requestAnimationFrame(() => element<HTMLElement>("#settings-title").focus());
 }
@@ -946,14 +861,13 @@ function renderSetupStep() {
     });
   }
   if (protonStep && setupStep === 2) {
-    renderProtonOptions(setupProtonVersion, setupDraft.protonVersion);
     setupProtonCustom.value = setupDraft.protonCustomPath;
     const status = snapshot?.proton ?? null;
     element("#setup-proton-hint").textContent = status?.ready
-      ? "Proton is already prepared"
-      : protonCatalogError ?? (setupProtonCustom.value.trim()
-        ? "Your custom Proton folder will be used"
-        : "Downloaded from GitHub and prepared when setup finishes");
+      ? "Proton is already prepared."
+      : setupProtonCustom.value.trim()
+        ? "Your custom Proton folder will be used."
+        : `${status?.managedTag ?? "GE-Proton"} is downloaded from GitHub and prepared when setup finishes.`;
     const ready = Boolean(status?.ready);
     element<HTMLElement>("#setup-proton-status").hidden = !ready;
   }
@@ -976,7 +890,7 @@ function renderSetupStep() {
     element<HTMLElement>("#setup-review-proton-row").hidden = !protonStep;
     element("#setup-review-proton").textContent = setupDraft.protonCustomPath
       ? `Custom: ${setupDraft.protonCustomPath}`
-      : setupDraft.protonVersion || "Managed GE-Proton";
+      : snapshot?.proton?.managedTag ?? "Managed GE-Proton";
     element("#setup-review-space").textContent = existingGame
       ? "Approximately 5 GiB free"
       : "Approximately 110 GiB";
@@ -992,7 +906,6 @@ function openSetup() {
     steamLanguage: snapshot?.preferences.steamLanguage ?? "english",
     authMethod: snapshot?.preferences.authMethod ?? "qr",
     ...crossoverPreferences(),
-    protonVersion: snapshot?.preferences.protonVersion ?? "",
     protonSource: snapshot?.preferences.protonSource ?? "managed",
     protonCustomPath: snapshot?.preferences.protonCustomPath ?? "",
     umuSource: snapshot?.preferences.umuSource ?? "managed",
@@ -1008,7 +921,6 @@ function openSetup() {
   renderSetupStep();
   setOverlay(setupView, true);
   void inspectSetupDirectory(setupDraft.installDirectory);
-  void loadProtonReleases();
   window.requestAnimationFrame(() => setupInstallDirectory.focus());
 }
 
@@ -1016,10 +928,9 @@ function closeSetup() {
   setOverlay(setupView, false);
 }
 
-async function chooseInstallDirectory(fallback: string) {
-  return inTauri
-    ? await open({ directory: true, multiple: false, title: "Choose a Sunrise installation folder" })
-    : fallback;
+/** Browser preview has no dialog, so it returns `previewValue` instead. */
+async function chooseFolder(title: string, previewValue: string | null) {
+  return inTauri ? await open({ directory: true, multiple: false, title }) : previewValue;
 }
 
 async function advanceSetup() {
@@ -1056,7 +967,6 @@ async function advanceSetup() {
     return;
   }
   if (isLinux() && setupStep === 2) {
-    setupDraft.protonVersion = setupProtonVersion.value;
     setupDraft.protonCustomPath = setupProtonCustom.value.trim();
     setupDraft.protonSource = setupDraft.protonCustomPath ? "custom" : "managed";
     setupStep = REVIEW_STEP;
@@ -1072,7 +982,6 @@ async function advanceSetup() {
     authMethod: (setupView.dataset.authMethod as AuthMethod | undefined) ?? setupDraft.authMethod,
     crossoverBottle: setupDraft.crossoverBottle,
     crossoverBackend: setupDraft.crossoverBackend,
-    protonVersion: setupDraft.protonVersion,
     protonSource: setupDraft.protonSource,
     protonCustomPath: setupDraft.protonCustomPath,
     umuSource: setupDraft.umuSource,
@@ -1393,11 +1302,9 @@ async function completeLinuxProtonSetup(preferences: Preferences, onEvent: Event
     return;
   }
 
-  const tag = preferences.protonSource === "managed" ? preferences.protonVersion.trim() : "";
-  const alreadyInstalled = tag !== "" && (status?.installedTags ?? []).includes(tag);
-  if (tag && !alreadyInstalled) {
-    resetOperationProgress("proton", `Downloading GE-Proton ${tag}…`);
-    await invokeCommand("install_proton", { tag, onEvent });
+  if (preferences.protonSource === "managed" && !status?.managedInstalled) {
+    resetOperationProgress("proton", `Downloading ${status?.managedTag ?? "GE-Proton"}…`);
+    await invokeCommand("install_proton", { onEvent });
   }
 
   resetOperationProgress("proton", "Preparing the Proton environment…");
@@ -1593,14 +1500,14 @@ window.addEventListener("DOMContentLoaded", () => {
     else window.open("https://github.com/stanuwu/Sunrise", "_blank", "noopener");
   });
   element("#browse-directory").addEventListener("click", async () => {
-    const selected = await chooseInstallDirectory("C:\\Games\\Project Sunrise");
+    const selected = await chooseFolder("Choose a Sunrise installation folder", "C:\\Games\\Project Sunrise");
     if (typeof selected === "string") {
       installDirectory.value = selected;
       await saveAndInspect();
     }
   });
   element("#setup-browse-directory").addEventListener("click", async () => {
-    const selected = await chooseInstallDirectory("C:\\Games\\Project Sunrise");
+    const selected = await chooseFolder("Choose a Sunrise installation folder", "C:\\Games\\Project Sunrise");
     if (typeof selected === "string") {
       setupInstallDirectory.value = selected;
       setupDraft.installDirectory = selected;
@@ -1744,16 +1651,12 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   element("#clear-console").addEventListener("click", () => consoleOutput.replaceChildren());
-  element("#proton-refresh").addEventListener("click", () => loadProtonReleases(true));
   element("#proton-toggle").addEventListener("click", () => {
-    const tag = protonVersion.value;
-    if (!tag) return;
-    const installed = (snapshot?.proton?.installedTags ?? []).includes(tag);
-    if (installed) void runProtonCommand("remove_proton", { tag }, "remove");
-    else void runProtonCommand("install_proton", { tag }, "install");
+    if (snapshot?.proton?.managedInstalled) void runProtonCommand("remove_proton", "remove");
+    else void runProtonCommand("install_proton", "install");
   });
   element("#proton-prepare").addEventListener("click", () => {
-    void runProtonCommand("initialize_proton_prefix", {}, "prepare");
+    void runProtonCommand("initialize_proton_prefix", "prepare");
   });
   protonProgressCancel.addEventListener("click", async () => {
     if (activeProtonOperation === "remove") return;
@@ -1770,17 +1673,16 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   element("#proton-browse").addEventListener("click", async () => {
-    const selected = await chooseInstallDirectory("/home/user/.steam/steam/compatibilitytools.d");
+    const selected = await chooseFolder("Choose a Proton folder", null);
     if (typeof selected === "string") {
       protonCustomPath.value = selected;
       await saveProtonPreferences();
     }
   });
   element("#setup-proton-browse").addEventListener("click", async () => {
-    const selected = await chooseInstallDirectory("/home/user/.steam/steam/compatibilitytools.d");
+    const selected = await chooseFolder("Choose a Proton folder", null);
     if (typeof selected === "string") setupProtonCustom.value = selected;
   });
-  protonVersion.addEventListener("change", () => void saveProtonPreferences());
   protonCustomPath.addEventListener("change", () => void saveProtonPreferences());
   protonUmuSource.addEventListener("change", () => void saveProtonPreferences());
   launchOptions.addEventListener("change", () => void saveProtonPreferences());
@@ -1793,5 +1695,5 @@ window.addEventListener("DOMContentLoaded", () => {
     if (!setupView.hidden) closeSetup();
     else if (!settingsView.hidden) closeSettings();
   });
-  void loadSnapshot().then(() => loadProtonReleases());
+  void loadSnapshot();
 });

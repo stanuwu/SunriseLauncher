@@ -17,7 +17,7 @@ use crate::github::GitHubClient;
 use crate::installer;
 use crate::models::{
     AppSnapshot, InstallationSnapshot, OperationEvent, OperationRequest, OperationResult,
-    Preferences, ProtonRelease, ProtonStatus, current_platform, resolve_language,
+    Preferences, ProtonStatus, current_platform, resolve_language,
 };
 #[cfg(target_os = "linux")]
 use crate::models::{ProtonSource, UmuSource};
@@ -202,7 +202,8 @@ fn proton_status(app: &AppHandle, preferences: &Preferences) -> Option<ProtonSta
             umu_source: None,
             selected_tag: None,
             proton_path: None,
-            installed_tags: Vec::new(),
+            managed_tag: proton::PROTON_TAG.into(),
+            managed_installed: false,
             prefix_path: String::new(),
             prefix_initialized: false,
             ready: false,
@@ -225,22 +226,6 @@ pub async fn get_proton_status(
 }
 
 #[tauri::command]
-pub async fn list_proton_releases(app: AppHandle, refresh: bool) -> AppResult<Vec<ProtonRelease>> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (app, refresh);
-        return Err(AppError::message("Proton is only available on Linux."));
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if !refresh && let Some(cached) = proton::load_cached_catalog(&app).await? {
-            return Ok(cached);
-        }
-        proton::refresh_catalog(&app, &GitHubClient::new()?).await
-    }
-}
-
-#[tauri::command]
 pub async fn inspect_installation(install_directory: String) -> AppResult<InstallationSnapshot> {
     storage::inspect_installation(&install_directory).await
 }
@@ -249,13 +234,12 @@ pub async fn inspect_installation(install_directory: String) -> AppResult<Instal
 pub async fn install_proton(
     app: AppHandle,
     state: State<'_, OperationState>,
-    tag: String,
     on_event: Channel<OperationEvent>,
 ) -> AppResult<ProtonStatus> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (app, state, tag, on_event);
-        return Err(AppError::message("Proton is only available on Linux."));
+        let _ = (app, state, on_event);
+        Err(AppError::message("Proton is only available on Linux."))
     }
     #[cfg(target_os = "linux")]
     {
@@ -269,22 +253,11 @@ pub async fn install_proton(
         let result = async {
             let github = GitHubClient::new()?;
             let mut preferences = storage::load_preferences(&app).await?;
-            let mut releases = proton::load_cached_catalog(&app).await?.unwrap_or_default();
-            if !releases.iter().any(|release| release.tag == tag) {
-                releases = proton::refresh_catalog(&app, &github).await?;
-            }
-            let release = releases
-                .iter()
-                .find(|release| release.tag == tag)
-                .ok_or_else(|| {
-                    AppError::message(format!("GE-Proton {tag} is not in the release list."))
-                })?;
             if preferences.umu_source == UmuSource::Managed {
                 proton::install_umu(&app, &github, &on_event, &cancel).await?;
             }
-            proton::install_proton(&app, &github, release, &on_event, &cancel).await?;
+            proton::install_proton(&app, &github, &on_event, &cancel).await?;
             preferences.proton_source = ProtonSource::Managed;
-            preferences.proton_version = tag.clone();
             storage::save_preferences(&app, &preferences).await?;
             proton::status(&app, &preferences)
         }
@@ -302,17 +275,16 @@ pub async fn install_proton(
 pub async fn remove_proton(
     app: AppHandle,
     state: State<'_, OperationState>,
-    tag: String,
 ) -> AppResult<ProtonStatus> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (app, state, tag);
-        return Err(AppError::message("Proton is only available on Linux."));
+        let _ = (app, state);
+        Err(AppError::message("Proton is only available on Linux."))
     }
     #[cfg(target_os = "linux")]
     {
         let _active = ActiveOperation::begin(state.inner(), true)?;
-        proton::remove_proton(&app, &tag)?;
+        proton::remove_proton(&app)?;
         let preferences = storage::load_preferences(&app).await?;
         proton::status(&app, &preferences)
     }
@@ -405,7 +377,7 @@ pub async fn initialize_proton_prefix(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, state, on_event);
-        return Err(AppError::message("Proton is only available on Linux."));
+        Err(AppError::message("Proton is only available on Linux."))
     }
     #[cfg(target_os = "linux")]
     {
